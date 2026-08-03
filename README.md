@@ -74,7 +74,30 @@ Structured output is enforced end-to-end: `--json-schema` (claude) and
 The default council seats **MELCHIOR on `gpt-5.6-sol`**, **BALTHASAR on
 `claude-opus-5`**, and **CASPER on `claude-fable-5`** — correctness
 deliberately sits on a different model family than the members judging it.
-Edit `default_council()` in `src/magi/council.py` to taste.
+
+---
+
+## Setup & configuration
+
+```sh
+uv run magi init            # detect installed CLIs, write the global config
+uv run magi init --local    # write ./magi.toml for this repo instead
+```
+
+`magi init` detects which CLIs you have and proposes a council: cross-family
+when both `claude` and `codex` are present, three distinct models of one
+family otherwise. Config is plain TOML — one table per member:
+
+```toml
+[council.melchior]
+backend = "codex"        # claude | codex | gemini (stub)
+model = "gpt-5.6-sol"
+effort = "xhigh"
+```
+
+Precedence: built-in defaults < `~/.config/magi/config.toml` (or
+`$MAGI_CONFIG`) < repo-local `./magi.toml`. Override only the members you
+want — the rest keep their defaults.
 
 ---
 
@@ -109,7 +132,6 @@ uv run pytest   # synthetic tests only — fake backends, no live model calls
 ## Roadmap
 
 - **Gemini backend** for the third seat
-- **Council config file** — per-member model/effort without touching code
 - **Experiment mode** — per-member git worktrees with `--sandbox workspace-write`
 - **Non-TTY mode** — plain report + exit code for CI
 

@@ -1,0 +1,86 @@
+"""Config loading and `magi init` — synthetic, no CLI detection or live calls."""
+
+import pytest
+
+from magi.backends import ClaudeCli, CodexCli
+from magi.config import init, load_council, propose
+
+
+def test_defaults_when_no_config_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    council = load_council(tmp_path)
+    assert set(council) == {"melchior", "balthasar", "casper"}
+    assert isinstance(council["melchior"], CodexCli)
+
+
+def test_repo_config_overrides_global(tmp_path, monkeypatch):
+    global_cfg = tmp_path / "global.toml"
+    global_cfg.write_text('[council.melchior]\nbackend = "claude"\nmodel = "from-global"\n')
+    monkeypatch.setenv("MAGI_CONFIG", str(global_cfg))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "magi.toml").write_text(
+        '[council.melchior]\nbackend = "claude"\nmodel = "from-repo"\neffort = "high"\n'
+    )
+    council = load_council(repo)
+    assert isinstance(council["melchior"], ClaudeCli)
+    assert council["melchior"].model == "from-repo"
+    assert council["melchior"].effort == "high"
+    # roles not mentioned anywhere keep built-in defaults
+    assert council["balthasar"].model == "claude-opus-5"
+
+
+def test_unknown_backend_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    (tmp_path / "magi.toml").write_text('[council.melchior]\nbackend = "gpt4all"\n')
+    with pytest.raises(ValueError, match="unknown backend"):
+        load_council(tmp_path)
+
+
+def test_unknown_role_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    (tmp_path / "magi.toml").write_text('[council.overlord]\nbackend = "claude"\n')
+    with pytest.raises(ValueError, match="unknown council role"):
+        load_council(tmp_path)
+
+
+def test_propose_compositions():
+    both = propose({"claude", "codex"})
+    assert both["melchior"]["backend"] == "codex"  # cross-family correctness seat
+    assert both["casper"]["backend"] == "claude"
+
+    claude_only = propose({"claude"})
+    assert {m["backend"] for m in claude_only.values()} == {"claude"}
+    assert len({m["model"] for m in claude_only.values()}) == 3  # distinct models
+
+    codex_only = propose({"codex"})
+    assert {m["backend"] for m in codex_only.values()} == {"codex"}
+
+    with pytest.raises(ValueError, match="no supported CLI"):
+        propose(set())
+
+    # gemini backend is a stub: never proposed even when detected
+    with_gemini = propose({"claude", "codex", "gemini"})
+    assert all(m["backend"] != "gemini" for m in with_gemini.values())
+
+
+def test_init_writes_and_respects_force(tmp_path):
+    dest = tmp_path / "cfg" / "config.toml"
+    text = init(dest, detected={"claude", "codex"})
+    assert dest.read_text() == text
+    assert "[council.melchior]" in text
+    with pytest.raises(FileExistsError, match="--force"):
+        init(dest, detected={"claude"})
+    init(dest, detected={"claude"}, force=True)
+    assert 'backend = "claude"' in dest.read_text()
+
+
+def test_init_output_roundtrips_through_loader(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    init(tmp_path / "magi.toml", detected={"claude", "codex"})
+    council = load_council(tmp_path)
+    assert isinstance(council["melchior"], CodexCli)
+    assert council["melchior"].model == "gpt-5.6-sol"
+    assert council["melchior"].effort == "xhigh"
+    assert isinstance(council["casper"], ClaudeCli)
+    assert council["casper"].model == "claude-fable-5"

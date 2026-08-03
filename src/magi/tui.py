@@ -389,14 +389,47 @@ class MagiApp(App):
         self._log(f"[bold]決議 {rec}[/]  ·  {votes}")
 
 
+def _init_main(argv: list[str]) -> None:
+    import argparse
+
+    from .config import detect_clis, global_config_path, init
+
+    ap = argparse.ArgumentParser(
+        prog="magi init", description="detect installed CLIs and write a council config"
+    )
+    ap.add_argument("--local", action="store_true",
+                    help="write ./magi.toml instead of the global config")
+    ap.add_argument("--force", action="store_true", help="overwrite an existing config")
+    args = ap.parse_args(argv)
+    dest = Path("magi.toml") if args.local else global_config_path()
+    detected = detect_clis()
+    print(f"detected CLIs: {', '.join(sorted(detected)) or 'none'}")
+    try:
+        text = init(dest, detected=detected, force=args.force)
+    except (FileExistsError, ValueError) as e:
+        raise SystemExit(f"magi init: {e}")
+    print(f"wrote {dest}:\n\n{text}")
+
+
 def main() -> None:
     import argparse
+    import sys
+
+    from .config import load_council
+
+    if sys.argv[1:2] == ["init"]:
+        return _init_main(sys.argv[2:])
 
     ap = argparse.ArgumentParser(prog="magi", description="MAGI review council")
     ap.add_argument("repo", nargs="?", default=".", help="repository to review")
     ap.add_argument("task", nargs="*", help="task / acceptance criteria")
     args = ap.parse_args()
-    MagiApp(repo=Path(args.repo).resolve(), task=" ".join(args.task) or None).run()
+    repo = Path(args.repo).resolve()
+    try:
+        council = load_council(repo)
+    except ValueError as e:
+        raise SystemExit(f"magi: config error: {e}")
+    MagiApp(council=council, repo=repo, task=" ".join(args.task) or None).run()
 
 
 if __name__ == "__main__":

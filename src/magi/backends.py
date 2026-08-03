@@ -188,6 +188,7 @@ class GeminiCli:
     """
 
     model: str | None = None
+    effort: str | None = None
     name: str = "gemini"
 
     async def ask(

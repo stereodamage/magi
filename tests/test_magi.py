@@ -264,6 +264,37 @@ def test_updated_verdict_flips_the_vote():
     assert got["recommendation"] == "APPROVE"
 
 
+def test_lone_challenge_cannot_disarm_blocking_veto():
+    """One member's CHALLENGE while the other responds OUT_OF_SCOPE (or stays
+    silent on the finding) must NOT dispute it — unanimity among responders."""
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),
+        MR("balthasar", "APPROVE"),
+        MR("casper", "APPROVE"),
+    ]
+    rebuttals = [
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "OUT_OF_SCOPE")]),
+    ]
+    got = merge(reviews, rebuttals)
+    assert got["disputed_findings"] == []
+    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["recommendation"] == "REQUEST_CHANGES"
+
+    # same with casper omitting a response for M-001 entirely
+    rebuttals[1] = MemberRebuttal("casper", "fake", "UNCHANGED", [])
+    got = merge(reviews, rebuttals)
+    assert got["disputed_findings"] == []
+    assert got["recommendation"] == "REQUEST_CHANGES"
+
+
+def test_missing_binary_becomes_backend_error():
+    from magi.backends import BackendError, _run
+
+    with pytest.raises(BackendError, match="cannot start"):
+        asyncio.run(_run(["magi-no-such-binary-xyz"], "", 5.0, None))
+
+
 def test_failed_rebuttal_never_weakens_findings():
     reviews = [
         MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),
@@ -328,7 +359,7 @@ def test_run_headless_exit_codes_and_json(repo, capsys):
     assert run_headless(approve, repo / "not-a-repo") == EXIT_ERROR
 
 
-def test_convene_runs_full_protocol(repo):
+def test_convene_runs_full_protocol_and_emits_events(repo):
     (repo / "a.py").write_text("x = 3\n")
     council = {
         "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("blocking")])),
@@ -336,10 +367,29 @@ def test_convene_runs_full_protocol(repo):
     }
     from magi.council import convene
 
-    reviews, rebuttals, merged = asyncio.run(convene(council, repo, "task"))
+    events = []
+    reviews, rebuttals, merged = asyncio.run(
+        convene(council, repo, "task", on_event=lambda kind, p: events.append(kind))
+    )
     assert len(reviews) == 2
     assert [rb.role for rb in rebuttals] == ["balthasar"]  # melchior has nothing to answer
     assert merged["recommendation"] == "REQUEST_CHANGES"
+    # progress streamed in protocol order
+    assert events[0] == "packet"
+    assert events.count("review") == 2
+    assert events[-1] == "merged"
+    assert events.index("rebuttal_start") > events.index("review")
+
+
+def test_run_headless_streams_progress_to_stderr(repo, capsys):
+    from magi.council import run_headless
+
+    (repo / "a.py").write_text("x = 4\n")
+    council = {r: FakeBackend(review()) for r in ("melchior", "balthasar")}
+    assert run_headless(council, repo) == 0
+    err = capsys.readouterr().err
+    assert "MELCHIOR review: APPROVE" in err
+    assert "決議 APPROVE" in err
 
 
 def test_packet_uncommitted_changes(repo):

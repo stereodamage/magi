@@ -28,13 +28,16 @@ class Reply:
 
 
 async def _run(cmd: list[str], stdin: str, timeout: float, cwd: Path | None) -> str:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=cwd,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+    except OSError as e:  # missing/unrunnable binary → member OFFLINE, not a crash
+        raise BackendError(f"{cmd[0]}: cannot start: {e}") from e
     try:
         out, err = await asyncio.wait_for(proc.communicate(stdin.encode()), timeout)
     except TimeoutError:

@@ -296,9 +296,11 @@ def merge(
     votes = {r.role: r.verdict for r in reviews}
     supports: dict[str, list[str]] = defaultdict(list)
     challenges: dict[str, list[str]] = defaultdict(list)
+    responders: set[str] = set()
     for rb in rebuttals or []:
         if rb.error:
             continue  # failed rebuttal never weakens a finding
+        responders.add(rb.role)
         if rb.updated_verdict not in ("", "UNCHANGED"):
             votes[rb.role] = rb.updated_verdict
         for resp in rb.responses:
@@ -312,7 +314,10 @@ def merge(
                 challenges[fid].append(rb.role)
 
     def disputed(fid: str) -> bool:
-        return bool(challenges[fid]) and not supports[fid]
+        # every responder must challenge, none may support; an omitted or
+        # OUT_OF_SCOPE response keeps the finding confirmed (fail-safe)
+        eligible = responders - {author.get(fid)}
+        return bool(eligible) and not supports[fid] and eligible <= set(challenges[fid])
 
     def label(fid: str) -> str:
         return f"{fid} {findings[fid].get('title', '')}".strip()
@@ -358,12 +363,37 @@ async def convene(
     repo: Path,
     task: str | None = None,
     timeout: float = 600.0,
+    on_event=None,
 ) -> tuple[list[MemberReview], list[MemberRebuttal], dict]:
-    """Full protocol: packet → parallel reviews → rebuttal → final merge."""
+    """Full protocol: packet → parallel reviews → rebuttal → final merge.
+
+    on_event(kind, payload) streams progress as it happens:
+    ("packet", str) → ("review", MemberReview)… → ("rebuttal_start", [roles])
+    → ("rebuttal", MemberRebuttal)… → ("merged", dict).
+    """
+    emit = on_event or (lambda kind, payload: None)
     packet = build_packet(repo, task)
-    reviews = await deliberate(council, packet, repo, timeout)
-    rebuttals = await rebut(council, packet, reviews, repo, timeout)
-    return reviews, rebuttals, merge(reviews, rebuttals)
+    emit("packet", packet)
+    reviews: list[MemberReview] = []
+    for fut in asyncio.as_completed(
+        [review_member(role, b, packet, repo, timeout) for role, b in council.items()]
+    ):
+        r = await fut
+        reviews.append(r)
+        emit("review", r)
+    roles = rebuttal_roles(council, reviews)
+    rebuttals: list[MemberRebuttal] = []
+    if roles:
+        emit("rebuttal_start", roles)
+        for fut in asyncio.as_completed(
+            [rebut_member(role, council[role], packet, reviews, repo, timeout) for role in roles]
+        ):
+            rb = await fut
+            rebuttals.append(rb)
+            emit("rebuttal", rb)
+    merged = merge(reviews, rebuttals)
+    emit("merged", merged)
+    return reviews, rebuttals, merged
 
 
 def render_text(
@@ -425,15 +455,42 @@ def run_headless(
     timeout: float = 600.0,
 ) -> int:
     """Run the full protocol without a TUI. Returns the process exit code:
-    0 APPROVE · 1 REQUEST_CHANGES · 2 HUMAN_REVIEW · 3 error."""
+    0 APPROVE · 1 REQUEST_CHANGES · 2 HUMAN_REVIEW · 3 error.
+
+    Phase progress streams to stderr as members finish, so a piped or CI run
+    stays observable while stdout waits for the final report."""
     import sys
+    import time
 
     if not is_git_repo(repo):
         print(f"magi: not a git repository: {repo}", file=sys.stderr)
         return EXIT_ERROR
     names = ", ".join(f"{role.upper()}({b.name})" for role, b in council.items())
     print(f"MAGI council convened: {names}", file=sys.stderr)
-    reviews, rebuttals, merged = asyncio.run(convene(council, repo, task, timeout))
+    t0 = time.monotonic()
+
+    def emit(kind: str, payload) -> None:
+        if kind == "packet":
+            msg = f"packet built ({len(payload)} chars); review round: {len(council)} members"
+        elif kind == "review":
+            note = f" — {payload.error}" if payload.error else ""
+            msg = (f"{payload.role.upper()} review: {payload.verdict}"
+                   f" ({len(payload.findings)} findings, {payload.duration_s:.0f}s){note}")
+        elif kind == "rebuttal_start":
+            msg = f"rebuttal round: {', '.join(payload)}"
+        elif kind == "rebuttal":
+            note = f" — {payload.error}" if payload.error else ""
+            msg = (f"{payload.role.upper()} rebuttal: {payload.updated_verdict}"
+                   f" ({len(payload.responses)} positions, {payload.duration_s:.0f}s){note}")
+        elif kind == "merged":
+            msg = f"決議 {payload['recommendation']}"
+        else:
+            return
+        print(f"[T+{time.monotonic() - t0:4.0f}s] {msg}", file=sys.stderr, flush=True)
+
+    reviews, rebuttals, merged = asyncio.run(
+        convene(council, repo, task, timeout, on_event=emit)
+    )
     render = render_json if as_json else render_text
     print(render(reviews, rebuttals, merged))
     return EXIT_CODES.get(merged["recommendation"], EXIT_CODES["HUMAN_REVIEW"])

@@ -433,7 +433,10 @@ def main() -> None:
     try:
         council = load_council(repo)
     except ValueError as e:
-        raise SystemExit(f"magi: config error: {e}")
+        from .council import EXIT_ERROR
+
+        print(f"magi: config error: {e}", file=sys.stderr)
+        raise SystemExit(EXIT_ERROR)  # exit 1 would read as REQUEST_CHANGES in CI
     if args.json or args.report or not sys.stdout.isatty():
         from .council import run_headless
 

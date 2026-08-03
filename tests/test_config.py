@@ -75,6 +75,19 @@ def test_init_writes_and_respects_force(tmp_path):
     assert 'backend = "claude"' in dest.read_text()
 
 
+def test_main_config_error_exits_3_not_1(tmp_path, monkeypatch, capsys):
+    """Exit 1 means REQUEST_CHANGES in CI; config errors must use 3."""
+    (tmp_path / "magi.toml").write_text('[council.melchior]\nbackend = "nope"\n')
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    monkeypatch.setattr("sys.argv", ["magi", str(tmp_path)])
+    from magi.tui import main
+
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 3
+    assert "config error" in capsys.readouterr().err
+
+
 def test_init_output_roundtrips_through_loader(tmp_path, monkeypatch):
     monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
     init(tmp_path / "magi.toml", detected={"claude", "codex"})

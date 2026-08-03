@@ -1,0 +1,196 @@
+"""Synthetic tests: no live model calls, no network. Fake backends only."""
+
+import asyncio
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+from conftest import FakeBackend, finding, review
+
+from magi.backends import ClaudeCli, CodexCli
+from magi.council import REVIEW_SCHEMA, build_packet, deliberate, merge
+from magi.personas import PERSONAS, PROTOCOL
+
+
+def run_council(**members):
+    return asyncio.run(deliberate(members, "PACKET", Path(".")))
+
+
+# --- command construction ----------------------------------------------------
+
+def test_claude_cmd_flags():
+    b = ClaudeCli(model="claude-opus-5", effort="xhigh")
+    cmd = b._cmd(system="PERSONA", schema={"type": "object"})
+    assert cmd[:2] == ["claude", "-p"]
+    for pair in (
+        ["--model", "claude-opus-5"],
+        ["--effort", "xhigh"],
+        ["--setting-sources", ""],  # pristine: no settings/hooks/CLAUDE.md
+        ["--append-system-prompt", "PERSONA"],
+        ["--allowedTools", "Read,Grep,Glob"],
+        ["--json-schema", '{"type": "object"}'],
+    ):
+        i = cmd.index(pair[0])
+        assert cmd[i + 1] == pair[1], pair
+
+
+def test_claude_cmd_minimal():
+    cmd = ClaudeCli(pristine=False, allowed_tools=(), effort=None)._cmd(None, None)
+    for flag in ("--setting-sources", "--append-system-prompt", "--allowedTools",
+                 "--json-schema", "--effort"):
+        assert flag not in cmd
+
+
+def test_codex_cmd_flags(tmp_path):
+    b = CodexCli(model="gpt-5.6-sol", effort="xhigh")
+    out, schema = tmp_path / "o.txt", tmp_path / "s.json"
+    cmd = b._cmd(out, schema)
+    assert cmd[:3] == ["codex", "exec", "-"]  # prompt via stdin
+    assert "--ephemeral" in cmd and "--skip-git-repo-check" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert cmd[cmd.index("-m") + 1] == "gpt-5.6-sol"
+    assert "model_reasoning_effort=xhigh" in cmd
+    assert "project_doc_max_bytes=0" in cmd  # pristine
+    assert cmd[cmd.index("--output-schema") + 1] == str(schema)
+
+
+# --- schema strictness (OpenAI structured-output rules) ----------------------
+
+def _walk(node):
+    yield node
+    for v in node.get("properties", {}).values():
+        yield from _walk(v)
+    if "items" in node:
+        yield from _walk(node["items"])
+
+
+def test_review_schema_strict():
+    for node in _walk(REVIEW_SCHEMA):
+        if node.get("type") == "object":
+            assert node["additionalProperties"] is False
+            assert sorted(node["required"]) == sorted(node["properties"].keys())
+
+
+# --- deliberation ------------------------------------------------------------
+
+def test_deliberate_personas_and_verdicts():
+    m = FakeBackend(review(verdict="REQUEST_CHANGES", findings=[finding()]))
+    b = FakeBackend(review())
+    reviews = run_council(melchior=m, balthasar=b)
+    by_role = {r.role: r for r in reviews}
+    assert by_role["melchior"].verdict == "REQUEST_CHANGES"
+    assert by_role["balthasar"].verdict == "APPROVE"
+    # each member got its own persona + shared protocol as system prompt
+    assert m.calls[0]["system"].startswith(PERSONAS["melchior"])
+    assert PROTOCOL in b.calls[0]["system"]
+    assert m.calls[0]["schema"] == REVIEW_SCHEMA
+    assert m.calls[0]["prompt"] == "PACKET"
+
+
+def test_deliberate_offline_member():
+    reviews = run_council(melchior=FakeBackend(fail=True), balthasar=FakeBackend(review()))
+    by_role = {r.role: r for r in reviews}
+    assert by_role["melchior"].verdict == "OFFLINE"
+    assert "boom" in by_role["melchior"].error
+    assert by_role["balthasar"].verdict == "APPROVE"
+
+
+def test_deliberate_malformed_review_is_abstain():
+    bad = FakeBackend(review=None)
+    bad.review = None  # ask() returns data=None
+    reviews = run_council(melchior=bad)
+    assert reviews[0].verdict == "ABSTAIN"
+
+
+# --- merge rules -------------------------------------------------------------
+
+def _merged(*verdict_findings):
+    reviews = run_council(**{
+        role: FakeBackend(review(v, f))
+        for role, (v, f) in zip(("melchior", "balthasar", "casper"), verdict_findings)
+    })
+    return merge(reviews)
+
+
+def test_blocking_finding_vetoes_even_unanimous_approval():
+    got = _merged(("APPROVE", [finding("blocking")]), ("APPROVE", []), ("APPROVE", []))
+    assert got["recommendation"] == "REQUEST_CHANGES"
+    assert got["blocking_findings"] == ["M-001 t"]
+
+
+def test_unanimous_approval():
+    got = _merged(("APPROVE", []), ("APPROVE", []), ("APPROVE", []))
+    assert got["recommendation"] == "APPROVE"
+
+
+def test_single_nonblocking_objection_goes_to_human():
+    got = _merged(("REQUEST_CHANGES", [finding("high")]), ("APPROVE", []), ("APPROVE", []))
+    assert got["recommendation"] == "HUMAN_REVIEW"
+
+
+def test_two_objections_request_changes():
+    got = _merged(
+        ("REQUEST_CHANGES", [finding("high")]),
+        ("REQUEST_CHANGES", [finding("high", "B-001")]),
+        ("APPROVE", []),
+    )
+    assert got["recommendation"] == "REQUEST_CHANGES"
+
+
+def test_offline_thins_quorum_to_human_review():
+    reviews = run_council(
+        melchior=FakeBackend(fail=True),
+        balthasar=FakeBackend(fail=True),
+        casper=FakeBackend(review()),
+    )
+    got = merge(reviews)
+    assert got["recommendation"] == "HUMAN_REVIEW"
+    assert sorted(got["offline"]) == ["balthasar", "melchior"]
+
+
+def test_two_online_approvals_with_one_offline_still_approve():
+    reviews = run_council(
+        melchior=FakeBackend(review()),
+        balthasar=FakeBackend(review()),
+        casper=FakeBackend(fail=True),
+    )
+    assert merge(reviews)["recommendation"] == "APPROVE"
+
+
+# --- evidence packet ---------------------------------------------------------
+
+@pytest.fixture
+def repo(tmp_path):
+    def git(*args):
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+            check=True, capture_output=True,
+        )
+    git("init", "-q")
+    (tmp_path / "a.py").write_text("x = 1\n")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    return tmp_path
+
+
+def test_packet_uncommitted_changes(repo):
+    (repo / "a.py").write_text("x = 2\n")
+    packet = build_packet(repo, task="make x 2")
+    assert "TASK / ACCEPTANCE CRITERIA:\nmake x 2" in packet
+    assert "-x = 1" in packet and "+x = 2" in packet
+    assert "working tree vs HEAD" in packet
+
+
+def test_repo_branch(repo, tmp_path_factory):
+    from magi.council import repo_branch
+
+    assert repo_branch(repo) != "-"  # fresh repo has a current branch
+    assert repo_branch(tmp_path_factory.mktemp("nonrepo")) == "-"
+
+
+def test_packet_clean_tree_reviews_last_commit(repo):
+    packet = build_packet(repo, task=None)
+    assert "last commit" in packet
+    assert "+x = 1" in packet
+    assert "no task description provided" in packet

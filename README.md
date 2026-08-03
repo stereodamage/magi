@@ -43,9 +43,17 @@ schema-enforced findings: every finding must name a trigger, an observable
 failure, and evidence. Vague output ("consider refactoring", "add more
 tests") is banned by protocol.
 
-Verdicts merge under **asymmetric rules**:
+Once the initial reviews lock, the **rebuttal round** (反論) convenes: each
+member responds to the other members' findings at the finding level —
+`ACCEPT / PARTIALLY_ACCEPT / CHALLENGE / OUT_OF_SCOPE` — where challenges
+require evidence, and may update its own verdict after reading the others.
 
-- one blocking finding vetoes approval, regardless of votes;
+Verdicts then merge under **asymmetric rules**:
+
+- a confirmed blocking finding vetoes approval, regardless of votes;
+- a finding challenged by every responder and supported by none is
+  **disputed** — it stops vetoing, but a disputed *blocking* finding
+  escalates to the human instead of allowing approval;
 - non-blocking objections need two members — or a human — to block;
 - a member erroring out goes 沈黙 (offline) and abstains: the council
   degrades instead of failing.
@@ -100,8 +108,6 @@ uv run pytest   # synthetic tests only — fake backends, no live model calls
 
 ## Roadmap
 
-- **Rebuttal round** — members respond to each other's findings at the
-  finding level before the merge
 - **Gemini backend** for the third seat
 - **Council config file** — per-member model/effort without touching code
 - **Experiment mode** — per-member git worktrees with `--sandbox workspace-write`

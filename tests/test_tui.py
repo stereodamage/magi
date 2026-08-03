@@ -1,6 +1,6 @@
 """TUI pilot tests — fake council, no live calls, no real terminal."""
 
-from conftest import FakeBackend, finding, review
+from conftest import FakeBackend, finding, position, rebuttal, review
 
 from magi.tui import MagiApp, TITLES, VERDICTS
 
@@ -55,6 +55,36 @@ async def test_cli_task_convenes_and_merges():
         assert app.query_one("#melchior").has_class("reject")
         assert app.query_one("#balthasar").has_class("approve")
         assert app.query_one("#casper").has_class("offline")
+
+
+async def test_rebuttal_updates_verdict_and_panel():
+    council = {
+        "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high", "M-001")])),
+        # balthasar challenges M-001 and concedes nothing else; casper accepts it
+        "balthasar": FakeBackend(
+            review("APPROVE"),
+            rebuttal_reply=rebuttal(responses=[position("M-001", "CHALLENGE")]),
+        ),
+        "casper": FakeBackend(
+            review("REQUEST_CHANGES", [finding("blocking", "C-001")]),
+            rebuttal_reply=rebuttal(responses=[position("M-001", "ACCEPT")]),
+        ),
+    }
+    # melchior concedes its own verdict after seeing C-001
+    council["melchior"].rebuttal_reply = rebuttal(
+        "APPROVE", [position("C-001", "ACCEPT")]
+    )
+    app = MagiApp(council=council, packet="PACKET", task="go")
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _wait_result(app, pilot)
+        # C-001 accepted by melchior → confirmed blocking → veto
+        assert app.result["recommendation"] == "REQUEST_CHANGES"
+        assert app.result["blocking_findings"] == ["C-001 t"]
+        # melchior's updated verdict reflected in votes and panel
+        assert app.result["votes"]["melchior"] == "APPROVE"
+        assert app.query_one("#melchior").has_class("approve")
+        # every member ran review + rebuttal
+        assert all(len(b.calls) == 2 for b in council.values())
 
 
 async def test_nonrepo_stays_standby(tmp_path):

@@ -1,7 +1,8 @@
-"""MAGI council: evidence packet, parallel deliberation, provisional merge.
+"""MAGI council: evidence packet, deliberation, rebuttal, asymmetric merge.
 
-Round 2 (finding-level rebuttal) comes next; merge() rules are provisional
-until then.
+Two rounds: members review independently, then cross-examine each other's
+findings at the finding level. merge() is provisional without rebuttals and
+final with them.
 """
 
 from __future__ import annotations
@@ -9,11 +10,12 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
-from dataclasses import dataclass
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .backends import BackendError, ClaudeCli, CodexCli, GeminiCli
-from .personas import PERSONAS, PROTOCOL
+from .personas import PERSONAS, PROTOCOL, REBUTTAL_PROTOCOL
 
 _FINDING_SCHEMA = {
     "type": "object",
@@ -55,6 +57,36 @@ REVIEW_SCHEMA = {
 }
 
 
+REBUTTAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "updated_verdict": {
+            "type": "string",
+            "enum": ["APPROVE", "REQUEST_CHANGES", "ABSTAIN", "UNCHANGED"],
+        },
+        "responses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "finding_id": {"type": "string"},
+                    "position": {
+                        "type": "string",
+                        "enum": ["ACCEPT", "PARTIALLY_ACCEPT", "CHALLENGE", "OUT_OF_SCOPE"],
+                    },
+                    "reason": {"type": "string"},
+                    "additional_evidence": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["finding_id", "position", "reason", "additional_evidence"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    "required": ["updated_verdict", "responses"],
+    "additionalProperties": False,
+}
+
+
 @dataclass
 class MemberReview:
     role: str
@@ -68,6 +100,17 @@ class MemberReview:
     @property
     def findings(self) -> list[dict]:
         return (self.review or {}).get("findings", [])
+
+
+@dataclass
+class MemberRebuttal:
+    role: str
+    backend: str
+    updated_verdict: str = "UNCHANGED"
+    responses: list[dict] = field(default_factory=list)
+    error: str | None = None
+    duration_s: float = 0.0
+    cost_usd: float | None = None
 
 
 def default_council() -> dict[str, object]:
@@ -152,25 +195,140 @@ async def deliberate(
     ))
 
 
-def merge(reviews: list[MemberReview]) -> dict:
-    """Provisional asymmetric merge (pre-rebuttal).
+# --- rebuttal round -----------------------------------------------------------
 
-    - any blocking finding vetoes approval, regardless of votes
+def rebuttal_roles(council: dict[str, object], reviews: list[MemberReview]) -> list[str]:
+    """Members that participate in the rebuttal: online, with someone else's
+    findings to respond to."""
+    by_role = {r.role: r for r in reviews}
+    roles = []
+    for role in council:
+        own = by_role.get(role)
+        if own is None or own.verdict == "OFFLINE":
+            continue
+        if any(rr.findings for rr in reviews if rr.role != role):
+            roles.append(role)
+    return roles
+
+
+def _rebuttal_prompt(packet: str, own: MemberReview, others: list[dict]) -> str:
+    return (
+        f"{packet}\n\n"
+        "=== YOUR ORIGINAL REVIEW (reference only) ===\n"
+        f"{json.dumps(own.review or {}, indent=2)}\n\n"
+        "=== FINDINGS TO RESPOND TO ===\n"
+        f"{json.dumps(others, indent=2)}"
+    )
+
+
+async def rebut_member(
+    role: str,
+    backend,
+    packet: str,
+    reviews: list[MemberReview],
+    repo: Path,
+    timeout: float = 600.0,
+) -> MemberRebuttal:
+    own = next(r for r in reviews if r.role == role)
+    others = [
+        {"author": rr.role, **f}
+        for rr in reviews if rr.role != role
+        for f in rr.findings
+    ]
+    system = PERSONAS[role] + "\n" + REBUTTAL_PROTOCOL
+    try:
+        r = await backend.ask(
+            _rebuttal_prompt(packet, own, others),
+            system=system,
+            schema=REBUTTAL_SCHEMA,
+            cwd=repo,
+            timeout=timeout,
+        )
+    except BackendError as e:
+        return MemberRebuttal(role=role, backend=backend.name, error=str(e))
+    data = r.data if isinstance(r.data, dict) else {}
+    return MemberRebuttal(
+        role,
+        backend.name,
+        data.get("updated_verdict", "UNCHANGED"),
+        data.get("responses", []),
+        None,
+        r.duration_s,
+        r.cost_usd,
+    )
+
+
+async def rebut(
+    council: dict[str, object],
+    packet: str,
+    reviews: list[MemberReview],
+    repo: Path,
+    timeout: float = 600.0,
+) -> list[MemberRebuttal]:
+    roles = rebuttal_roles(council, reviews)
+    return list(await asyncio.gather(
+        *(rebut_member(role, council[role], packet, reviews, repo, timeout) for role in roles)
+    ))
+
+
+def merge(
+    reviews: list[MemberReview],
+    rebuttals: list[MemberRebuttal] | None = None,
+) -> dict:
+    """Asymmetric merge — provisional without rebuttals, final with them.
+
+    - a confirmed blocking finding vetoes approval, regardless of votes
+    - a finding challenged by every responder (and supported by none) is
+      DISPUTED: it stops vetoing, but a disputed *blocking* finding escalates
+      to HUMAN_REVIEW rather than allowing approval
+    - members may update their verdict after the rebuttal
     - non-blocking objections need two members (or a human) to block
     - OFFLINE/ABSTAIN thin the quorum toward HUMAN_REVIEW, never toward APPROVE
     """
-    blocking = [
-        f"{f.get('id', '?')} {f.get('title', '')}".strip()
-        for r in reviews
-        for f in r.findings
-        if f.get("severity") == "blocking"
-    ]
-    online = [r for r in reviews if r.verdict != "OFFLINE"]
-    approvals = sum(r.verdict == "APPROVE" for r in online)
-    objections = sum(r.verdict == "REQUEST_CHANGES" for r in online)
+    author: dict[str, str] = {}
+    findings: dict[str, dict] = {}
+    for r in reviews:
+        for f in r.findings:
+            fid = f.get("id", "?")
+            author.setdefault(fid, r.role)
+            findings.setdefault(fid, f)
 
-    if blocking:
+    votes = {r.role: r.verdict for r in reviews}
+    supports: dict[str, list[str]] = defaultdict(list)
+    challenges: dict[str, list[str]] = defaultdict(list)
+    for rb in rebuttals or []:
+        if rb.error:
+            continue  # failed rebuttal never weakens a finding
+        if rb.updated_verdict not in ("", "UNCHANGED"):
+            votes[rb.role] = rb.updated_verdict
+        for resp in rb.responses:
+            fid = resp.get("finding_id", "")
+            if fid not in findings or rb.role == author.get(fid):
+                continue  # a member cannot support its own finding
+            position = resp.get("position")
+            if position in ("ACCEPT", "PARTIALLY_ACCEPT"):
+                supports[fid].append(rb.role)
+            elif position == "CHALLENGE":
+                challenges[fid].append(rb.role)
+
+    def disputed(fid: str) -> bool:
+        return bool(challenges[fid]) and not supports[fid]
+
+    def label(fid: str) -> str:
+        return f"{fid} {findings[fid].get('title', '')}".strip()
+
+    blocking_ids = [fid for fid, f in findings.items() if f.get("severity") == "blocking"]
+    blocking_confirmed = [label(fid) for fid in blocking_ids if not disputed(fid)]
+    disputed_findings = [label(fid) for fid in findings if disputed(fid)]
+
+    online = [role for role, v in votes.items() if v != "OFFLINE"]
+    approvals = sum(votes[role] == "APPROVE" for role in online)
+    objections = sum(votes[role] == "REQUEST_CHANGES" for role in online)
+
+    if blocking_confirmed:
         rec = "REQUEST_CHANGES"
+    elif any(disputed(fid) for fid in blocking_ids):
+        rec = "HUMAN_REVIEW"
     elif objections >= 2:
         rec = "REQUEST_CHANGES"
     elif objections == 1:
@@ -182,8 +340,9 @@ def merge(reviews: list[MemberReview]) -> dict:
 
     return {
         "recommendation": rec,
-        "blocking_findings": blocking,
-        "votes": {r.role: r.verdict for r in reviews},
+        "blocking_findings": blocking_confirmed,
+        "disputed_findings": disputed_findings,
+        "votes": votes,
         "offline": [r.role for r in reviews if r.verdict == "OFFLINE"],
     }
 
@@ -214,8 +373,20 @@ async def _main(repo: Path, task: str | None) -> None:
                 print(f"    ({key[:-1]}) {item[:150]}")
         print()
 
-    print("=== MERGED (provisional) ===")
-    print(json.dumps(merge(reviews), indent=2))
+    rebuttals: list[MemberRebuttal] = []
+    if rebuttal_roles(council, reviews):
+        print("=== REBUTTAL ROUND ===")
+        rebuttals = await rebut(council, packet, reviews, repo)
+        for rb in rebuttals:
+            print(f"--- {rb.role.upper()} verdict: {rb.updated_verdict} ({rb.duration_s:.0f}s)")
+            if rb.error:
+                print(f"    rebuttal failed: {rb.error}")
+            for resp in rb.responses:
+                print(f"    {resp['position']:16} {resp['finding_id']}  {resp['reason'][:120]}")
+        print()
+
+    print("=== MERGED ===")
+    print(json.dumps(merge(reviews, rebuttals), indent=2))
 
 
 if __name__ == "__main__":

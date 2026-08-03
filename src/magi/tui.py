@@ -21,11 +21,14 @@ from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
 from .council import (
+    MemberRebuttal,
     MemberReview,
     build_packet,
     default_council,
     is_git_repo,
     merge,
+    rebut_member,
+    rebuttal_roles,
     repo_branch,
     review_member,
 )
@@ -44,6 +47,13 @@ VERDICTS = {
 }
 
 _WAVE = "░▒▓█▓▒░ "
+_PHASE_LABEL = {"review": "審 議 中", "rebuttal": "反 論 中"}
+_POSITION_MARKUP = {
+    "ACCEPT": "[green]ACCEPT[/]",
+    "PARTIALLY_ACCEPT": "[yellow]PARTIALLY_ACCEPT[/]",
+    "CHALLENGE": "[bold red]CHALLENGE[/]",
+    "OUT_OF_SCOPE": "[dim]OUT_OF_SCOPE[/]",
+}
 _SEV_MARKUP = {
     "blocking": "[bold white on red] BLOCKING [/]",
     "high": "[bold red]high[/]",
@@ -167,6 +177,7 @@ class MagiApp(App):
         self._frame = 0
         self._deliberating = False
         self._diff_lines = "----"
+        self._phase = "review"
         self._pending: set[str] = set()
 
     # --- layout ---------------------------------------------------------------
@@ -239,8 +250,9 @@ class MagiApp(App):
 
     def _paint_running(self, role: str) -> None:
         wave = _WAVE[self._frame % len(_WAVE):] + _WAVE[: self._frame % len(_WAVE)]
+        label = _PHASE_LABEL.get(self._phase, "審 議 中")
         self.query_one(f"#{role}", Static).update(
-            f"{TITLES[role]}\n{self._model_line(role)}\n\n{wave}  審 議 中  {wave[::-1]}"
+            f"{TITLES[role]}\n{self._model_line(role)}\n\n{wave}  {label}  {wave[::-1]}"
         )
 
     def _paint_verdict(self, r: MemberReview) -> None:
@@ -277,6 +289,7 @@ class MagiApp(App):
             return
         self.result = None
         self._deliberating = True
+        self._phase = "review"
         self._t0 = time.monotonic()
         self._pending = set(self.council)
         bar = self.query_one("#statusbar", Static)
@@ -316,7 +329,48 @@ class MagiApp(App):
                     f"[bold]{f['id']}[/] {sev} {f['title']}"
                     f" [dim](conf {f['confidence']:.2f})[/]{loc}"
                 )
-        self._finish(merge(reviews))
+        rebuttals = await self._rebut(packet, reviews)
+        self._finish(merge(reviews, rebuttals))
+
+    async def _rebut(self, packet: str, reviews: list[MemberReview]) -> list[MemberRebuttal]:
+        roles = rebuttal_roles(self.council, reviews)
+        if not roles:
+            return []
+        self._phase = "rebuttal"
+        self._pending = set(roles)
+        self._log("[dim]— 反論 rebuttal round: findings cross-examined —[/]")
+        for role in roles:
+            panel = self.query_one(f"#{role}", Static)
+            panel.remove_class("approve", "reject", "abstain", "offline")
+        by_role = {r.role: r for r in reviews}
+        rebuttals: list[MemberRebuttal] = []
+        coros = [
+            rebut_member(role, self.council[role], packet, reviews, self.repo)
+            for role in roles
+        ]
+        for fut in asyncio.as_completed(coros):
+            rb = await fut
+            rebuttals.append(rb)
+            self._pending.discard(rb.role)
+            review = by_role[rb.role]
+            if rb.error:
+                self._log(f"[dim][{rb.role.upper()}] rebuttal failed: {rb.error[:120]}[/]")
+            else:
+                for resp in rb.responses:
+                    pos = _POSITION_MARKUP.get(resp["position"], resp["position"])
+                    reason = resp.get("reason", "")[:110]
+                    self._log(
+                        f"[dim][{rb.role.upper()}][/] {pos} [bold]{resp['finding_id']}[/]"
+                        f" [dim]{reason}[/]"
+                    )
+                if rb.updated_verdict not in ("", "UNCHANGED") and rb.updated_verdict != review.verdict:
+                    self._log(
+                        f"[dim][{rb.role.upper()}][/] verdict updated:"
+                        f" {review.verdict} → [bold]{rb.updated_verdict}[/]"
+                    )
+                    review.verdict = rb.updated_verdict
+            self._paint_verdict(review)
+        return rebuttals
 
     def _finish(self, merged: dict) -> None:
         self.result = merged
@@ -329,6 +383,8 @@ class MagiApp(App):
         bar.update(f"決 議 — {rec}   (T+{elapsed:.0f}s)")
         if merged["blocking_findings"]:
             self._log("[bold red]blocking:[/] " + "; ".join(merged["blocking_findings"]))
+        if merged.get("disputed_findings"):
+            self._log("[yellow]disputed (human decision):[/] " + "; ".join(merged["disputed_findings"]))
         votes = "  ".join(f"{role}:{v}" for role, v in merged["votes"].items())
         self._log(f"[bold]決議 {rec}[/]  ·  {votes}")
 

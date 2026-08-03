@@ -6,15 +6,29 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from conftest import FakeBackend, finding, review
+from conftest import FakeBackend, finding, position, rebuttal, review
 
 from magi.backends import ClaudeCli, CodexCli
-from magi.council import REVIEW_SCHEMA, build_packet, deliberate, merge
-from magi.personas import PERSONAS, PROTOCOL
+from magi.council import (
+    REBUTTAL_SCHEMA,
+    REVIEW_SCHEMA,
+    MemberRebuttal,
+    MemberReview,
+    build_packet,
+    deliberate,
+    merge,
+    rebut,
+    rebuttal_roles,
+)
+from magi.personas import PERSONAS, PROTOCOL, REBUTTAL_PROTOCOL
 
 
 def run_council(**members):
     return asyncio.run(deliberate(members, "PACKET", Path(".")))
+
+
+def MR(role, verdict, findings=()):
+    return MemberReview(role, "fake", verdict, review(verdict, findings))
 
 
 # --- command construction ----------------------------------------------------
@@ -156,6 +170,112 @@ def test_two_online_approvals_with_one_offline_still_approve():
         casper=FakeBackend(fail=True),
     )
     assert merge(reviews)["recommendation"] == "APPROVE"
+
+
+# --- rebuttal round ------------------------------------------------------------
+
+def test_rebuttal_roles_skip_offline_and_nothing_to_answer():
+    council = {"melchior": None, "balthasar": None, "casper": None}
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),  # only author of findings
+        MR("balthasar", "APPROVE"),
+        MemberReview("casper", "fake", "OFFLINE", None, "boom"),
+    ]
+    # melchior has no one else's findings; casper is offline; balthasar responds
+    assert rebuttal_roles(council, reviews) == ["balthasar"]
+
+
+def test_rebut_prompt_carries_own_review_and_others_findings():
+    m = FakeBackend(review("REQUEST_CHANGES", [finding("blocking", "M-001")]))
+    b = FakeBackend(review("REQUEST_CHANGES", [finding("high", "B-001")]))
+    council = {"melchior": m, "balthasar": b}
+    reviews = run_council(**council)
+    rebuttals = asyncio.run(rebut(council, "PACKET", reviews, Path(".")))
+    assert {rb.role for rb in rebuttals} == {"melchior", "balthasar"}
+    # melchior's second call: sees B-001 as target, own M-001 only as reference
+    rebut_call = m.calls[1]
+    assert rebut_call["schema"] is REBUTTAL_SCHEMA
+    assert "FINDINGS TO RESPOND TO" in rebut_call["prompt"]
+    assert '"B-001"' in rebut_call["prompt"].split("FINDINGS TO RESPOND TO")[1]
+    assert "YOUR ORIGINAL REVIEW" in rebut_call["prompt"]
+    assert REBUTTAL_PROTOCOL in rebut_call["system"]
+
+
+def test_disputed_blocking_escalates_to_human():
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),
+        MR("balthasar", "APPROVE"),
+        MR("casper", "APPROVE"),
+    ]
+    rebuttals = [
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+    ]
+    got = merge(reviews, rebuttals)
+    assert got["recommendation"] == "HUMAN_REVIEW"
+    assert got["blocking_findings"] == []
+    assert got["disputed_findings"] == ["M-001 t"]
+
+
+def test_supported_blocking_still_vetoes_despite_challenge():
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),
+        MR("balthasar", "APPROVE"),
+        MR("casper", "APPROVE"),
+    ]
+    rebuttals = [
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "PARTIALLY_ACCEPT")]),
+    ]
+    got = merge(reviews, rebuttals)
+    assert got["recommendation"] == "REQUEST_CHANGES"
+    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["disputed_findings"] == []
+
+
+def test_author_cannot_support_own_finding():
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),
+        MR("balthasar", "APPROVE"),
+        MR("casper", "APPROVE"),
+    ]
+    rebuttals = [
+        MemberRebuttal("melchior", "fake", "UNCHANGED", [position("M-001", "ACCEPT")]),
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+    ]
+    got = merge(reviews, rebuttals)
+    assert got["disputed_findings"] == ["M-001 t"]
+    assert got["recommendation"] == "HUMAN_REVIEW"
+
+
+def test_updated_verdict_flips_the_vote():
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("high")]),
+        MR("balthasar", "APPROVE"),
+        MR("casper", "APPROVE"),
+    ]
+    # provisional: one objection → HUMAN_REVIEW
+    assert merge(reviews)["recommendation"] == "HUMAN_REVIEW"
+    # after rebuttal melchior concedes → unanimous APPROVE
+    rebuttals = [MemberRebuttal("melchior", "fake", "APPROVE", [])]
+    got = merge(reviews, rebuttals)
+    assert got["votes"]["melchior"] == "APPROVE"
+    assert got["recommendation"] == "APPROVE"
+
+
+def test_failed_rebuttal_never_weakens_findings():
+    reviews = [
+        MR("melchior", "REQUEST_CHANGES", [finding("blocking")]),
+        MR("balthasar", "APPROVE"),
+    ]
+    rebuttals = [
+        MemberRebuttal("balthasar", "fake", error="timeout",
+                       responses=[position("M-001", "CHALLENGE")]),
+    ]
+    got = merge(reviews, rebuttals)
+    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["recommendation"] == "REQUEST_CHANGES"
 
 
 # --- evidence packet ---------------------------------------------------------

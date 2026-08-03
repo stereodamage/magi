@@ -347,51 +347,103 @@ def merge(
     }
 
 
-# --- demo entry point --------------------------------------------------------
+# --- headless / CI -------------------------------------------------------------
 
-async def _main(repo: Path, task: str | None) -> None:
-    council = default_council()
+EXIT_CODES = {"APPROVE": 0, "REQUEST_CHANGES": 1, "HUMAN_REVIEW": 2}
+EXIT_ERROR = 3
+
+
+async def convene(
+    council: dict[str, object],
+    repo: Path,
+    task: str | None = None,
+    timeout: float = 600.0,
+) -> tuple[list[MemberReview], list[MemberRebuttal], dict]:
+    """Full protocol: packet → parallel reviews → rebuttal → final merge."""
     packet = build_packet(repo, task)
-    names = ", ".join(f"{role.upper()}({b.name})" for role, b in council.items())
-    print(f"MAGI council convened: {names}")
-    print(f"packet: {len(packet)} chars\n")
+    reviews = await deliberate(council, packet, repo, timeout)
+    rebuttals = await rebut(council, packet, reviews, repo, timeout)
+    return reviews, rebuttals, merge(reviews, rebuttals)
 
-    reviews = await deliberate(council, packet, repo)
 
+def render_text(
+    reviews: list[MemberReview],
+    rebuttals: list[MemberRebuttal],
+    merged: dict,
+) -> str:
+    out = []
     for r in reviews:
         cost = f" ${r.cost_usd:.2f}" if r.cost_usd else ""
-        print(f"--- {r.role.upper()} [{r.backend}] {r.verdict} ({r.duration_s:.0f}s{cost})")
+        out.append(f"--- {r.role.upper()} [{r.backend}] {r.verdict} ({r.duration_s:.0f}s{cost})")
         if r.error:
-            print(f"    offline: {r.error}")
+            out.append(f"    offline: {r.error}")
         for f in r.findings:
             loc = f" {f['file']}:{f['start_line']}" if f.get("file") else ""
-            print(f"    [{f['severity']:8}] {f['id']} {f['title']} (conf {f['confidence']:.2f}){loc}")
-            print(f"               trigger: {f['trigger'][:150]}")
+            out.append(f"    [{f['severity']:8}] {f['id']} {f['title']} (conf {f['confidence']:.2f}){loc}")
+            out.append(f"               trigger: {f['trigger'][:150]}")
         rv = r.review or {}
         for key in ("unverified_hypotheses", "questions", "residual_risks"):
             for item in rv.get(key, []):
-                print(f"    ({key[:-1]}) {item[:150]}")
-        print()
-
-    rebuttals: list[MemberRebuttal] = []
-    if rebuttal_roles(council, reviews):
-        print("=== REBUTTAL ROUND ===")
-        rebuttals = await rebut(council, packet, reviews, repo)
+                out.append(f"    ({key[:-1]}) {item[:150]}")
+        out.append("")
+    if rebuttals:
+        out.append("=== REBUTTAL ROUND ===")
         for rb in rebuttals:
-            print(f"--- {rb.role.upper()} verdict: {rb.updated_verdict} ({rb.duration_s:.0f}s)")
+            out.append(f"--- {rb.role.upper()} verdict: {rb.updated_verdict} ({rb.duration_s:.0f}s)")
             if rb.error:
-                print(f"    rebuttal failed: {rb.error}")
+                out.append(f"    rebuttal failed: {rb.error}")
             for resp in rb.responses:
-                print(f"    {resp['position']:16} {resp['finding_id']}  {resp['reason'][:120]}")
-        print()
+                out.append(f"    {resp['position']:16} {resp['finding_id']}  {resp['reason'][:120]}")
+        out.append("")
+    out.append("=== MERGED ===")
+    out.append(json.dumps(merged, indent=2))
+    return "\n".join(out)
 
-    print("=== MERGED ===")
-    print(json.dumps(merge(reviews, rebuttals), indent=2))
+
+def render_json(
+    reviews: list[MemberReview],
+    rebuttals: list[MemberRebuttal],
+    merged: dict,
+) -> str:
+    from dataclasses import asdict
+
+    return json.dumps(
+        {
+            **merged,
+            "reviews": [asdict(r) for r in reviews],
+            "rebuttals": [asdict(rb) for rb in rebuttals],
+        },
+        indent=2,
+    )
+
+
+def run_headless(
+    council: dict[str, object],
+    repo: Path,
+    task: str | None = None,
+    as_json: bool = False,
+    timeout: float = 600.0,
+) -> int:
+    """Run the full protocol without a TUI. Returns the process exit code:
+    0 APPROVE · 1 REQUEST_CHANGES · 2 HUMAN_REVIEW · 3 error."""
+    import sys
+
+    if not is_git_repo(repo):
+        print(f"magi: not a git repository: {repo}", file=sys.stderr)
+        return EXIT_ERROR
+    names = ", ".join(f"{role.upper()}({b.name})" for role, b in council.items())
+    print(f"MAGI council convened: {names}", file=sys.stderr)
+    reviews, rebuttals, merged = asyncio.run(convene(council, repo, task, timeout))
+    render = render_json if as_json else render_text
+    print(render(reviews, rebuttals, merged))
+    return EXIT_CODES.get(merged["recommendation"], EXIT_CODES["HUMAN_REVIEW"])
 
 
 if __name__ == "__main__":
     import sys
 
+    from .config import load_council
+
     repo_arg = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
     task_arg = sys.argv[2] if len(sys.argv) > 2 else None
-    asyncio.run(_main(repo_arg, task_arg))
+    raise SystemExit(run_headless(load_council(repo_arg), repo_arg, task_arg))

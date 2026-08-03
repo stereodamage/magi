@@ -423,13 +423,22 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="magi", description="MAGI review council")
     ap.add_argument("repo", nargs="?", default=".", help="repository to review")
     ap.add_argument("task", nargs="*", help="task / acceptance criteria")
+    ap.add_argument("--report", action="store_true",
+                    help="headless: text report on stdout, exit code carries the verdict")
+    ap.add_argument("--json", action="store_true",
+                    help="headless: JSON result on stdout, exit code carries the verdict")
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
+    task = " ".join(args.task) or None
     try:
         council = load_council(repo)
     except ValueError as e:
         raise SystemExit(f"magi: config error: {e}")
-    MagiApp(council=council, repo=repo, task=" ".join(args.task) or None).run()
+    if args.json or args.report or not sys.stdout.isatty():
+        from .council import run_headless
+
+        raise SystemExit(run_headless(council, repo, task, as_json=args.json))
+    MagiApp(council=council, repo=repo, task=task).run()
 
 
 if __name__ == "__main__":

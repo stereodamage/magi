@@ -1,7 +1,7 @@
 <h1 align="center">M A G I</h1>
 
 <p align="center">
-  <em>Evangelion-style deliberation council for code review.</em>
+  <em>A deliberation council for code review.</em>
 </p>
 
 <p align="center">
@@ -109,6 +109,19 @@ uv run magi /path/to/repo         # standby with explicit repo
 uv run magi . "task description"  # convenes immediately
 ```
 
+### CI / headless
+
+```sh
+magi . "task" --report    # text report on stdout
+magi . "task" --json      # machine-readable result (merge + full reviews/rebuttals)
+```
+
+When stdout is not a TTY, magi runs headless automatically — pipe it or call
+it from CI and the full protocol (reviews → rebuttal → merge) executes without
+the TUI. The exit code carries the verdict: **0** APPROVE ·
+**1** REQUEST_CHANGES · **2** HUMAN_REVIEW · **3** error. Progress goes to
+stderr, so `--json` output stays clean for piping into `jq` or a PR comment.
+
 Bare launch is always **standby** — the council convenes only when you type
 the question (task / acceptance criteria) and press enter. MAGI reviews
 uncommitted changes against `HEAD`, falling back to the last commit on a
@@ -133,7 +146,6 @@ uv run pytest   # synthetic tests only — fake backends, no live model calls
 
 - **Gemini backend** for the third seat
 - **Experiment mode** — per-member git worktrees with `--sandbox workspace-write`
-- **Non-TTY mode** — plain report + exit code for CI
 
 ---
 

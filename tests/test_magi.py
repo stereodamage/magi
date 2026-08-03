@@ -294,6 +294,54 @@ def repo(tmp_path):
     return tmp_path
 
 
+# --- headless / CI -------------------------------------------------------------
+
+def test_run_headless_exit_codes_and_json(repo, capsys):
+    import json as jsonlib
+
+    from magi.council import EXIT_ERROR, run_headless
+
+    (repo / "a.py").write_text("x = 2\n")  # something to review
+
+    approve = {r: FakeBackend(review()) for r in ("melchior", "balthasar", "casper")}
+    assert run_headless(approve, repo, as_json=True) == 0
+    out = jsonlib.loads(capsys.readouterr().out)
+    assert out["recommendation"] == "APPROVE"
+    assert {r["role"] for r in out["reviews"]} == set(approve)
+
+    blocking = {
+        "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("blocking")])),
+        "balthasar": FakeBackend(review()),
+        "casper": FakeBackend(review()),
+    }
+    assert run_headless(blocking, repo) == 1
+    assert "M-001" in capsys.readouterr().out
+
+    lone_objection = {
+        "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high")])),
+        "balthasar": FakeBackend(review()),
+        "casper": FakeBackend(review()),
+    }
+    assert run_headless(lone_objection, repo) == 2
+    capsys.readouterr()
+
+    assert run_headless(approve, repo / "not-a-repo") == EXIT_ERROR
+
+
+def test_convene_runs_full_protocol(repo):
+    (repo / "a.py").write_text("x = 3\n")
+    council = {
+        "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("blocking")])),
+        "balthasar": FakeBackend(review()),
+    }
+    from magi.council import convene
+
+    reviews, rebuttals, merged = asyncio.run(convene(council, repo, "task"))
+    assert len(reviews) == 2
+    assert [rb.role for rb in rebuttals] == ["balthasar"]  # melchior has nothing to answer
+    assert merged["recommendation"] == "REQUEST_CHANGES"
+
+
 def test_packet_uncommitted_changes(repo):
     (repo / "a.py").write_text("x = 2\n")
     packet = build_packet(repo, task="make x 2")

@@ -145,9 +145,30 @@ def _git(repo: Path, *args: str) -> str:
     return r.stdout
 
 
+_UNTRACKED_CAP = 100_000  # bytes per untracked file
+
+
+def _untracked_diffs(repo: Path) -> str:
+    """New-file diffs for untracked files, read-only via git diff --no-index.
+
+    Respects .gitignore; oversized files are noted and skipped so one stray
+    data dump cannot flood the evidence packet."""
+    parts = []
+    for name in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
+        try:
+            size = (repo / name).stat().st_size
+        except OSError:
+            continue
+        if size > _UNTRACKED_CAP:
+            parts.append(f"# untracked file skipped ({size} bytes > {_UNTRACKED_CAP}): {name}\n")
+            continue
+        parts.append(_git(repo, "diff", "--no-index", "--", "/dev/null", name))
+    return "".join(parts)
+
+
 def build_packet(repo: Path, task: str | None = None) -> str:
-    diff = _git(repo, "diff", "HEAD")
-    scope = "uncommitted changes (working tree vs HEAD)"
+    diff = _git(repo, "diff", "HEAD") + _untracked_diffs(repo)
+    scope = "uncommitted changes (working tree vs HEAD, untracked files included)"
     if not diff.strip():
         diff = _git(repo, "show", "HEAD", "--patch")
         scope = "last commit"

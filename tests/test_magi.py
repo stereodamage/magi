@@ -412,3 +412,33 @@ def test_packet_clean_tree_reviews_last_commit(repo):
     assert "last commit" in packet
     assert "+x = 1" in packet
     assert "no task description provided" in packet
+
+
+def test_packet_includes_untracked_files(repo):
+    (repo / "new_module.py").write_text("def fresh(): return 42\n")
+    packet = build_packet(repo, task="add module")
+    assert "untracked files included" in packet
+    assert "new_module.py" in packet
+    assert "+def fresh(): return 42" in packet
+    # tracked changes and untracked files appear together
+    (repo / "a.py").write_text("x = 9\n")
+    packet = build_packet(repo, task=None)
+    assert "+x = 9" in packet and "+def fresh(): return 42" in packet
+
+
+def test_packet_respects_gitignore_and_size_cap(repo):
+    (repo / ".gitignore").write_text("secret.txt\n")
+    (repo / "secret.txt").write_text("token=hunter2\n")
+    (repo / "huge.txt").write_text("x" * 200_000)
+    packet = build_packet(repo, task=None)
+    assert "hunter2" not in packet
+    assert "huge.txt" in packet and "skipped" in packet
+    assert "x" * 1000 not in packet
+
+
+def test_packet_works_in_repo_with_no_commits(tmp_path):
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    (tmp_path / "first.py").write_text("a = 1\n")
+    packet = build_packet(tmp_path, task="first file")
+    assert "+a = 1" in packet
+    assert "untracked files included" in packet

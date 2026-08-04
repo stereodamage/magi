@@ -136,9 +136,10 @@ uv run magi . "task description"  # the council starts immediately
 Without a task argument, the TUI starts in standby mode. Type the task in the
 question field and push the enter key. Then the council starts.
 
-MAGI reviews the difference between the work tree and `HEAD`. Files that git
-does not track are not in this difference. When the difference is empty, MAGI
-reviews the last commit.
+MAGI reviews the difference between the work tree and `HEAD`, plus all
+untracked files. Files in `.gitignore` are not included. An untracked file
+larger than 100 kB is noted and skipped. When there is no difference and
+there are no untracked files, MAGI reviews the last commit.
 
 The TUI shows one panel for each member. A panel is amber during the review.
 Then the panel color shows the verdict: green 可決, red 否決, yellow 保留,
@@ -193,7 +194,6 @@ The tests use fake backends. The tests do not make live model calls.
 - Add the gemini backend.
 - Add the experiment mode: one git worktree for each member, with a sandbox
   that permits writes.
-- Include untracked files in the review scope.
 
 ## License
 

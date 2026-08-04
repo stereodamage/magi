@@ -142,9 +142,13 @@ larger than 100 kB is noted and skipped. When there is no difference and
 there are no untracked files, MAGI reviews the last commit.
 
 The TUI shows one panel for each member. A panel is amber during the review.
-Then the panel color shows the verdict: green 可決, red 否決, yellow 保留,
-dark 沈黙. The findings and the rebuttal positions go to the ticker. The
-merged verdict goes to the status bar.
+The panel names the model at its bottom edge. Then the panel color shows the
+verdict: green 可決, red 否決, yellow 保留, dark 沈黙. The findings and the
+rebuttal positions go to the ticker. The merged verdict goes to the status bar.
+
+The question field is locked while the council deliberates. Push ctrl+c to stop
+the council at any stage. MAGI stops the member CLI processes and returns to
+standby. Push ctrl+q to quit.
 
 ### Plan review
 

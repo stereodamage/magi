@@ -69,6 +69,33 @@ def test_codex_cmd_flags(tmp_path):
     assert cmd[cmd.index("--output-schema") + 1] == str(schema)
 
 
+async def test_cancel_kills_the_member_process():
+    """ctrl+c must not orphan a running claude/codex child."""
+    from magi.backends import _run
+
+    marker = "31.4159"  # unique enough to pgrep for
+
+    def alive():
+        return subprocess.run(
+            ["pgrep", "-f", f"sleep {marker}"], capture_output=True
+        ).returncode == 0
+
+    task = asyncio.ensure_future(_run(["sleep", marker], "", 30.0, None))
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        if alive():
+            break
+    assert alive(), "child never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    for _ in range(40):
+        await asyncio.sleep(0.05)
+        if not alive():
+            break
+    assert not alive(), "cancelled member left an orphan process"
+
+
 # --- schema strictness (OpenAI structured-output rules) ----------------------
 
 def _walk(node):

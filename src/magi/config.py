@@ -74,7 +74,7 @@ def propose(detected: set[str]) -> dict[str, dict]:
         return {
             "melchior": {"backend": "claude", "model": "claude-fable-5", "effort": "xhigh"},
             "balthasar": {"backend": "claude", "model": "claude-opus-5", "effort": "xhigh"},
-            "casper": {"backend": "claude", "model": "claude-sonnet-5", "effort": "xhigh"},
+            "casper": {"backend": "claude", "model": "claude-opus-4-8", "effort": "xhigh"},
         }
     if "codex" in detected:
         return {

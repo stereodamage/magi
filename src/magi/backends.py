@@ -43,6 +43,9 @@ async def _run(cmd: list[str], stdin: str, timeout: float, cwd: Path | None) -> 
     except TimeoutError:
         proc.kill()
         raise BackendError(f"{cmd[0]}: timeout after {timeout}s")
+    except asyncio.CancelledError:  # operator stopped the council — do not orphan the CLI
+        proc.kill()
+        raise
     if proc.returncode != 0:
         raise BackendError(f"{cmd[0]} exited {proc.returncode}: {err.decode()[-2000:]}")
     return out.decode()

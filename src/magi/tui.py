@@ -16,7 +16,9 @@ import asyncio
 import time
 from pathlib import Path
 
+from rich.rule import Rule
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
@@ -64,6 +66,10 @@ _SEV_MARKUP = {
 
 class MagiApp(App):
     TITLE = "MAGI SYSTEM"
+
+    # priority: beats the focused Input's ctrl+c binding. ctrl+q still quits.
+    BINDINGS = [Binding("ctrl+c", "stop_council", "stop the council",
+                        priority=True, show=False)]
 
     CSS = """
     Screen {
@@ -119,10 +125,20 @@ class MagiApp(App):
     }
     .member {
         border: heavy #ff7b00;
-        content-align: center middle;
-        text-align: center;
         color: #ffa028;
         height: 100%;
+    }
+    /* body takes the slack so the model line sits on the panel floor.
+       Neither child sets `color`: both inherit the verdict color from .member. */
+    .mbody {
+        height: 1fr;
+        content-align: center middle;
+        text-align: center;
+    }
+    .mmodel {
+        height: 1;
+        text-align: center;
+        text-style: dim;
     }
     #magi { height: 100%; }
     .member.standby { border: heavy #7a4a08; color: #8a6a30; }
@@ -183,6 +199,8 @@ class MagiApp(App):
         self._diff_lines = "----"
         self._phase = "review"
         self._pending: set[str] = set()
+        self._worker = None
+        self._inflight: list[asyncio.Task] = []
 
     # --- layout ---------------------------------------------------------------
 
@@ -192,13 +210,13 @@ class MagiApp(App):
                 with Vertical(id="leftcol"):
                     yield Static("質  問", classes="jheader")
                     yield Static(self._meta_text(), id="meta")
-                yield Static(id="balthasar", classes="member standby")
+                yield from self._member_panel("balthasar")
                 with Vertical(id="rightcol"):
                     yield Static("解  決", classes="jheader")
                     yield Static("情 報", id="info")
-                yield Static(id="casper", classes="member standby")
+                yield from self._member_panel("casper")
                 yield Static("M A G I", id="magi")
-                yield Static(id="melchior", classes="member standby")
+                yield from self._member_panel("melchior")
             yield RichLog(id="log", wrap=True, markup=True)
             with Horizontal(id="qbar"):
                 yield Static("question:", id="qlabel")
@@ -207,6 +225,11 @@ class MagiApp(App):
                     placeholder=f"task / acceptance criteria — repo: {self.repo}",
                 )
             yield Static(id="statusbar")
+
+    def _member_panel(self, role: str) -> ComposeResult:
+        with Vertical(id=role, classes="member standby"):
+            yield Static(id=f"{role}-body", classes="mbody")
+            yield Static(self._model_line(role), classes="mmodel")
 
     def on_mount(self) -> None:
         for role in self.council:
@@ -247,39 +270,44 @@ class MagiApp(App):
         model = getattr(b, "model", None) or ""
         return f"{model}  ({b.name})".strip()
 
+    def _body(self, role: str) -> Static:
+        return self.query_one(f"#{role}-body", Static)
+
     def _paint_standby(self, role: str) -> None:
-        self.query_one(f"#{role}", Static).update(
-            f"{TITLES[role]}\n{self._model_line(role)}\n\n—  S T A N D B Y  —"
-        )
+        self._body(role).update(f"{TITLES[role]}\n\n—  S T A N D B Y  —")
 
     def _paint_running(self, role: str) -> None:
         wave = _WAVE[self._frame % len(_WAVE):] + _WAVE[: self._frame % len(_WAVE)]
         label = _PHASE_LABEL.get(self._phase, "審 議 中")
-        self.query_one(f"#{role}", Static).update(
-            f"{TITLES[role]}\n{self._model_line(role)}\n\n{wave}  {label}  {wave[::-1]}"
+        self._body(role).update(
+            f"{TITLES[role]}\n\n{wave}  {label}  {wave[::-1]}"
         )
 
     def _paint_verdict(self, r: MemberReview) -> None:
         label, css = VERDICTS.get(r.verdict, ("？", "abstain"))
-        panel = self.query_one(f"#{r.role}", Static)
+        panel = self.query_one(f"#{r.role}", Vertical)
         panel.remove_class("approve", "reject", "abstain", "offline")
         panel.add_class(css)
         n = len(r.findings)
         detail = f"{n} finding{'s' if n != 1 else ''}" if not r.error else "no response"
-        panel.update(
-            f"{TITLES[r.role]}\n{self._model_line(r.role)}\n\n"
+        self._body(r.role).update(
+            f"{TITLES[r.role]}\n\n"
             f"{label}\n{r.verdict}  ·  {detail}  ·  {r.duration_s:.0f}s"
         )
 
     def _tick(self) -> None:
+        bars = self.query("#statusbar")
+        if not bars:  # the timer can outlive the screen while the app shuts down
+            return
         self._frame += 1
         for role in self._pending:
             self._paint_running(role)
-        bar = self.query_one("#statusbar", Static)
+        bar = bars.first(Static)
         if self._deliberating:
             elapsed = time.monotonic() - self._t0
             waiting = ", ".join(sorted(self._pending)) or "—"
-            bar.update(f"T+{elapsed:5.0f}s   deliberating: {waiting}")
+            clock = f"T+{elapsed:.0f}s"  # pad the whole token, not the number
+            bar.update(f"{clock:<9}deliberating: {waiting}")
         elif self.result is None:
             bar.update("STANDBY — enter the question below to convene")
 
@@ -298,16 +326,41 @@ class MagiApp(App):
         self._pending = set(self.council)
         bar = self.query_one("#statusbar", Static)
         bar.remove_class("approve", "reject")
+        self.query_one("#taskinput", Input).disabled = True  # no edits mid-session
         for role in self.council:
-            panel = self.query_one(f"#{role}", Static)
+            panel = self.query_one(f"#{role}", Vertical)
             panel.remove_class("standby", "approve", "reject", "abstain", "offline")
             self._paint_running(role)
         self._refresh_meta()
+        self._log("[bold]Council convened.[/]")
         self._log(
-            f"[dim]council of {len(self.council)} convened — "
-            f"{self.task_text or 'no task text (reviewing repo changes as-is)'}[/]"
+            f"Q: {self.task_text or '[dim]no task text — repo changes reviewed as-is[/]'}"
         )
-        self.run_worker(self._deliberate(), exclusive=True)
+        self.query_one("#log", RichLog).write(Rule(style="#5a4a20"))
+        self._worker = self.run_worker(self._deliberate(), exclusive=True)
+
+    def action_stop_council(self) -> None:
+        """ctrl+c — abandon the session at any stage and return to standby."""
+        if not self._deliberating:
+            return self.action_help_quit()  # idle: keep the "press ctrl+q" hint
+        for task in self._inflight:  # cancelling kills the member CLI processes
+            task.cancel()
+        self._inflight = []
+        if self._worker is not None:
+            self._worker.cancel()
+        self._log("[bold red]中 止[/] — council stopped by the operator")
+        self._deliberating = False
+        self._pending.clear()
+        self._refresh_meta()
+        for role in self.council:
+            panel = self.query_one(f"#{role}", Vertical)
+            panel.remove_class("approve", "reject", "abstain", "offline")
+            panel.add_class("standby")
+            self._paint_standby(role)
+        self.query_one("#statusbar", Static).remove_class("approve", "reject")
+        inp = self.query_one("#taskinput", Input)
+        inp.disabled = False
+        inp.focus()
 
     async def _deliberate(self) -> None:
         packet = self.packet or build_packet(self.repo, self.task_text)
@@ -315,12 +368,13 @@ class MagiApp(App):
             sum(1 for line in packet.splitlines() if line.startswith(("+", "-")))
         )
         self._refresh_meta()
-        coros = [
-            review_member(role, b, packet, self.repo, mode=self.mode)
+        # kept on self so ctrl+c can cancel the stragglers, not just the worker
+        self._inflight = [
+            asyncio.ensure_future(review_member(role, b, packet, self.repo, mode=self.mode))
             for role, b in self.council.items()
         ]
         reviews: list[MemberReview] = []
-        for fut in asyncio.as_completed(coros):
+        for fut in asyncio.as_completed(self._inflight):
             r = await fut
             reviews.append(r)
             self._pending.discard(r.role)
@@ -331,7 +385,7 @@ class MagiApp(App):
                 sev = _SEV_MARKUP.get(f["severity"], f["severity"])
                 loc = f" [dim]{f['file']}:{f['start_line']}[/]" if f.get("file") else ""
                 self._log(
-                    f"[bold]{f['id']}[/] {sev} {f['title']}"
+                    f"[bold]{f['id']}:[/] {f['title']}  {sev}"
                     f" [dim](conf {f['confidence']:.2f})[/]{loc}"
                 )
         rebuttals = await self._rebut(packet, reviews)
@@ -343,17 +397,21 @@ class MagiApp(App):
             return []
         self._phase = "rebuttal"
         self._pending = set(roles)
-        self._log("[dim]— 反論 rebuttal round: findings cross-examined —[/]")
+        self.query_one("#log", RichLog).write(
+            Rule("反論 rebuttal — findings cross-examined", style="#5a4a20")
+        )
         for role in roles:
-            panel = self.query_one(f"#{role}", Static)
+            panel = self.query_one(f"#{role}", Vertical)
             panel.remove_class("approve", "reject", "abstain", "offline")
         by_role = {r.role: r for r in reviews}
         rebuttals: list[MemberRebuttal] = []
-        coros = [
-            rebut_member(role, self.council[role], packet, reviews, self.repo, mode=self.mode)
+        self._inflight = [
+            asyncio.ensure_future(
+                rebut_member(role, self.council[role], packet, reviews, self.repo, mode=self.mode)
+            )
             for role in roles
         ]
-        for fut in asyncio.as_completed(coros):
+        for fut in asyncio.as_completed(self._inflight):
             rb = await fut
             rebuttals.append(rb)
             self._pending.discard(rb.role)
@@ -380,7 +438,11 @@ class MagiApp(App):
     def _finish(self, merged: dict) -> None:
         self.result = merged
         self._deliberating = False
+        self._inflight = []
         self._refresh_meta()
+        inp = self.query_one("#taskinput", Input)
+        inp.disabled = False
+        inp.focus()
         rec = merged["recommendation"]
         bar = self.query_one("#statusbar", Static)
         bar.add_class("approve" if rec == "APPROVE" else "reject")

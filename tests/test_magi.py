@@ -69,6 +69,43 @@ def test_codex_cmd_flags(tmp_path):
     assert cmd[cmd.index("--output-schema") + 1] == str(schema)
 
 
+def test_finding_view_and_authorship():
+    from magi.council import Finding, finding_authors
+
+    raw = finding("high", "M-001")
+    f = Finding.of(raw)
+    assert (f.id, f.severity, f.confidence) == ("M-001", "high", 0.9)
+    assert f.location == "f.py:1"
+
+    nowhere = dict(raw)
+    del nowhere["file"]  # members may report a finding with no file
+    assert Finding.of(nowhere).location == ""
+
+    assert Finding.of({}).id == "?"  # a malformed finding must not crash a render
+
+    reviews = [
+        MR("balthasar", "REQUEST_CHANGES", [finding("low", "B-003")]),
+        MR("melchior", "APPROVE", [finding("high", "M-001")]),
+    ]
+    assert finding_authors(reviews) == {"B-003": "balthasar", "M-001": "melchior"}
+
+
+def test_text_report_names_the_finding_author():
+    from magi.council import render_text
+
+    reviews = [
+        MR("balthasar", "REQUEST_CHANGES", [finding("low", "B-003")]),
+        MR("melchior", "APPROVE"),
+    ]
+    rebuttals = [
+        MemberRebuttal("melchior", "codex", "REQUEST_CHANGES",
+                       [position("B-003", "CHALLENGE", "no path")]),
+    ]
+    report = render_text(reviews, rebuttals, merge(reviews, rebuttals))
+    # a position targets someone else's finding — the report must say whose
+    assert "B-003 (by balthasar)" in report
+
+
 async def test_cancel_kills_the_member_process():
     """ctrl+c must not orphan a running claude/codex child."""
     from magi.backends import _run

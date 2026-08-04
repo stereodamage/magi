@@ -113,6 +113,44 @@ class MemberRebuttal:
     cost_usd: float | None = None
 
 
+@dataclass(frozen=True)
+class Finding:
+    """Read-only view over one schema-validated finding, for the renderers.
+
+    The wire format stays the raw dict — it is what the member returned and
+    what render_json writes back out. This view exists so the TUI ticker and
+    the text report read fields by name in one place instead of each reaching
+    into the dict. Layout stays with each renderer; they differ on purpose.
+    """
+
+    id: str
+    title: str
+    severity: str
+    confidence: float
+    location: str  # "path:line", empty when the member named no file
+    trigger: str
+
+    @classmethod
+    def of(cls, f: dict) -> Finding:
+        return cls(
+            id=f.get("id", "?"),
+            title=f.get("title", ""),
+            severity=f.get("severity", ""),
+            confidence=float(f.get("confidence", 0.0)),
+            location=f"{f['file']}:{f['start_line']}" if f.get("file") else "",
+            trigger=f.get("trigger", ""),
+        )
+
+
+def finding_authors(reviews: list[MemberReview]) -> dict[str, str]:
+    """finding id → the role that filed it. The first filer wins a collision."""
+    author: dict[str, str] = {}
+    for r in reviews:
+        for f in r.findings:
+            author.setdefault(f.get("id", "?"), r.role)
+    return author
+
+
 def default_council() -> dict[str, object]:
     """Per-member model/effort assignment — adjust freely.
 
@@ -327,13 +365,11 @@ def merge(
     - non-blocking objections need two members (or a human) to block
     - OFFLINE/ABSTAIN thin the quorum toward HUMAN_REVIEW, never toward APPROVE
     """
-    author: dict[str, str] = {}
+    author = finding_authors(reviews)
     findings: dict[str, dict] = {}
     for r in reviews:
         for f in r.findings:
-            fid = f.get("id", "?")
-            author.setdefault(fid, r.role)
-            findings.setdefault(fid, f)
+            findings.setdefault(f.get("id", "?"), f)
 
     votes = {r.role: r.verdict for r in reviews}
     supports: dict[str, list[str]] = defaultdict(list)
@@ -456,23 +492,30 @@ def render_text(
         out.append(f"--- {r.role.upper()} [{r.backend}] {r.verdict} ({r.duration_s:.0f}s{cost})")
         if r.error:
             out.append(f"    offline: {r.error}")
-        for f in r.findings:
-            loc = f" {f['file']}:{f['start_line']}" if f.get("file") else ""
-            out.append(f"    [{f['severity']:8}] {f['id']} {f['title']} (conf {f['confidence']:.2f}){loc}")
-            out.append(f"               trigger: {f['trigger'][:150]}")
+        for raw in r.findings:
+            f = Finding.of(raw)
+            loc = f" {f.location}" if f.location else ""
+            out.append(f"    [{f.severity:8}] {f.id} {f.title} (conf {f.confidence:.2f}){loc}")
+            out.append(f"               trigger: {f.trigger[:150]}")
         rv = r.review or {}
         for key in ("unverified_hypotheses", "questions", "residual_risks"):
             for item in rv.get(key, []):
                 out.append(f"    ({key[:-1]}) {item[:150]}")
         out.append("")
     if rebuttals:
+        author = finding_authors(reviews)
         out.append("=== REBUTTAL ROUND ===")
         for rb in rebuttals:
             out.append(f"--- {rb.role.upper()} verdict: {rb.updated_verdict} ({rb.duration_s:.0f}s)")
             if rb.error:
                 out.append(f"    rebuttal failed: {rb.error}")
             for resp in rb.responses:
-                out.append(f"    {resp['position']:16} {resp['finding_id']}  {resp['reason'][:120]}")
+                fid = resp["finding_id"]
+                filed_by = author.get(fid, "?")
+                out.append(
+                    f"    {resp['position']:16} {fid} (by {filed_by})"
+                    f"  {resp['reason'][:120]}"
+                )
         out.append("")
     out.append("=== MERGED ===")
     out.append(json.dumps(merged, indent=2))

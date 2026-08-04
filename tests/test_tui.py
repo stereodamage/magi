@@ -125,6 +125,97 @@ async def test_model_line_on_panel_floor_and_input_locked_while_deliberating():
         assert model.rich_style.color == panel.rich_style.color
 
 
+async def test_rebuttal_lines_name_the_finding_author():
+    council = {
+        "balthasar": FakeBackend(review("REQUEST_CHANGES", [finding("low", "B-003")])),
+        "melchior": FakeBackend(
+            review("APPROVE"),
+            rebuttal_reply=rebuttal("REQUEST_CHANGES",
+                                    [position("B-003", "CHALLENGE", "no path")]),
+        ),
+        "casper": FakeBackend(review("APPROVE")),
+    }
+    app = MagiApp(council=council, packet="PACKET", task="go")
+    async with app.run_test(size=(110, 32)) as pilot:
+        await _wait_result(app, pilot)
+        ticker = [line.text for line in app.query_one("#log").lines]
+    # a position names the member it targets; a verdict change speaks for itself
+    assert any("[MELCHIOR → BALTHASAR] CHALLENGE B-003" in t for t in ticker)
+    assert any(t.startswith("[MELCHIOR] verdict updated:") for t in ticker)
+
+
+async def test_every_vote_reaches_the_ticker_in_its_verdict_color():
+    from rich.color import Color
+
+    from magi.tui import _VERDICT_COLOR
+
+    council = {
+        "melchior": FakeBackend(review("APPROVE")),
+        "balthasar": FakeBackend(review("REQUEST_CHANGES", [finding("high", "B-001")])),
+        "casper": FakeBackend(fail=True),  # → OFFLINE
+    }
+    app = MagiApp(council=council, packet="PACKET", task="go")
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _wait_result(app, pilot)
+        seen = {}
+        for line in app.query_one("#log").lines:
+            for seg in line._segments:  # private, but the only view of rendered color
+                if seg.text in _VERDICT_COLOR and seg.style and seg.style.color:
+                    seen.setdefault(seg.text, seg.style.color.triplet)
+    # every member's verdict is logged, not just the closing tally
+    assert set(seen) == {"APPROVE", "REQUEST_CHANGES", "HUMAN_REVIEW"} | {"OFFLINE"}
+    for verdict, triplet in seen.items():
+        assert triplet == Color.parse(_VERDICT_COLOR[verdict]).triplet
+
+
+async def test_finish_writes_the_full_run_to_disk(tmp_path):
+    import json
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    council = {
+        "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high", "M-001")])),
+        "balthasar": FakeBackend(
+            review("APPROVE"),
+            rebuttal_reply=rebuttal(responses=[position("M-001", "CHALLENGE")]),
+        ),
+        "casper": FakeBackend(review("APPROVE")),
+    }
+    app = MagiApp(council=council, repo=tmp_path, packet="PACKET", task="go")
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _wait_result(app, pilot)
+    run = json.loads((tmp_path / ".magi" / "last-run.json").read_text())
+    assert run["recommendation"] == app.result["recommendation"]
+    assert {r["role"] for r in run["reviews"]} == set(council)
+    by_role = {r["role"]: r for r in run["reviews"]}
+    assert by_role["melchior"]["review"]["findings"][0]["id"] == "M-001"
+    assert run["rebuttals"], "rebuttal round must be recorded too"
+    # self-ignoring, so the log never lands in the next evidence packet
+    assert (tmp_path / ".magi" / ".gitignore").read_text() == "*\n"
+    ignored = subprocess.run(
+        ["git", "-C", str(tmp_path), "ls-files", "--others", "--exclude-standard"],
+        capture_output=True, text=True,
+    ).stdout
+    assert ".magi" not in ignored
+
+
+async def test_long_rebuttal_reason_wraps_instead_of_truncating():
+    reason = "because " * 40  # 320 chars — far past any one ticker line
+    council = {
+        "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high", "M-001")])),
+        "balthasar": FakeBackend(
+            review("APPROVE"),
+            rebuttal_reply=rebuttal(responses=[position("M-001", "CHALLENGE", reason)]),
+        ),
+        "casper": FakeBackend(review("APPROVE")),
+    }
+    app = MagiApp(council=council, packet="PACKET", task="go")
+    async with app.run_test(size=(100, 32)) as pilot:
+        await _wait_result(app, pilot)
+        ticker = "".join(line.text for line in app.query_one("#log").lines)
+        assert ticker.count("because") == 40  # every word survived the wrap
+
+
 async def test_ctrl_c_stops_the_council_at_any_stage():
     for stop_in_phase in ("review", "rebuttal"):
         council = {

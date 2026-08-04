@@ -143,12 +143,23 @@ there are no untracked files, MAGI reviews the last commit.
 
 The TUI shows one panel for each member. A panel is amber during the review.
 The panel names the model at its bottom edge. Then the panel color shows the
-verdict: green 可決, red 否決, yellow 保留, dark 沈黙. The findings and the
-rebuttal positions go to the ticker. The merged verdict goes to the status bar.
+verdict: green 可決, red 否決, yellow 保留, dark 沈黙. The merged verdict goes
+to the status bar.
+
+The ticker records the deliberation in sequence: the verdict of each member as
+the member reports, then the findings, then the rebuttal positions, then each
+changed verdict, then the closing vote count. Every verdict uses the same color
+as the member panels.
 
 The question field is locked while the council deliberates. Push ctrl+c to stop
 the council at any stage. MAGI stops the member CLI processes and returns to
 standby. Push ctrl+q to quit.
+
+The ticker shows a summary. The complete deliberation goes to
+`.magi/last-run.json` in the repository that you review — every finding, every
+rebuttal position, and the merge result. This is the same JSON that `--json`
+prints. MAGI writes `.magi/.gitignore` one time, so the directory stays out of
+git and out of the next evidence packet. A stopped council writes no file.
 
 ### Plan review
 

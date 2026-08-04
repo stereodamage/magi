@@ -23,10 +23,12 @@ from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Input, RichLog, Static
 
 from .council import (
+    Finding,
     MemberRebuttal,
     MemberReview,
     build_packet,
     default_council,
+    finding_authors,
     is_git_repo,
     merge,
     rebut_member,
@@ -62,6 +64,18 @@ _SEV_MARKUP = {
     "medium": "[yellow]medium[/]",
     "low": "[dim]low[/]",
 }
+# same colors the member panels use, so the ticker and the board agree
+_VERDICT_COLOR = {
+    "APPROVE": "#00e070",
+    "REQUEST_CHANGES": "#ff4d4d",
+    "ABSTAIN": "#ffd23f",
+    "OFFLINE": "#5a5a5a",
+    "HUMAN_REVIEW": "#ffd23f",
+}
+
+
+def _vote(verdict: str) -> str:
+    return f"[bold {_VERDICT_COLOR.get(verdict, '#ffa028')}]{verdict}[/]"
 
 
 class MagiApp(App):
@@ -379,17 +393,24 @@ class MagiApp(App):
             reviews.append(r)
             self._pending.discard(r.role)
             self._paint_verdict(r)
+            n = len(r.findings)
+            self._log(
+                f"[dim][{r.role.upper()}][/] {_vote(r.verdict)}"
+                f" [dim]· {n} finding{'s' if n != 1 else ''}"
+                f" · {r.duration_s:.0f}s[/]"
+            )
             if r.error:
                 self._log(f"[dim][{r.role.upper()}] offline: {r.error[:120]}[/]")
-            for f in r.findings:
-                sev = _SEV_MARKUP.get(f["severity"], f["severity"])
-                loc = f" [dim]{f['file']}:{f['start_line']}[/]" if f.get("file") else ""
+            for raw in r.findings:
+                f = Finding.of(raw)
+                sev = _SEV_MARKUP.get(f.severity, f.severity)
+                loc = f" [dim]{f.location}[/]" if f.location else ""
                 self._log(
-                    f"[bold]{f['id']}:[/] {f['title']}  {sev}"
-                    f" [dim](conf {f['confidence']:.2f})[/]{loc}"
+                    f"[bold]{f.id}:[/] {f.title}  {sev}"
+                    f" [dim](conf {f.confidence:.2f})[/]{loc}"
                 )
         rebuttals = await self._rebut(packet, reviews)
-        self._finish(merge(reviews, rebuttals, self.mode))
+        self._finish(merge(reviews, rebuttals, self.mode), reviews, rebuttals)
 
     async def _rebut(self, packet: str, reviews: list[MemberReview]) -> list[MemberRebuttal]:
         roles = rebuttal_roles(self.council, reviews)
@@ -404,6 +425,7 @@ class MagiApp(App):
             panel = self.query_one(f"#{role}", Vertical)
             panel.remove_class("approve", "reject", "abstain", "offline")
         by_role = {r.role: r for r in reviews}
+        author = finding_authors(reviews)  # a position targets someone else's finding
         rebuttals: list[MemberRebuttal] = []
         self._inflight = [
             asyncio.ensure_future(
@@ -421,21 +443,50 @@ class MagiApp(App):
             else:
                 for resp in rb.responses:
                     pos = _POSITION_MARKUP.get(resp["position"], resp["position"])
-                    reason = resp.get("reason", "")[:110]
+                    reason = resp.get("reason", "")  # RichLog wraps it; do not cut
+                    fid = resp["finding_id"]
+                    filed_by = author.get(fid)
+                    who = rb.role.upper()
+                    if filed_by and filed_by != rb.role:
+                        who = f"{who} → {filed_by.upper()}"
                     self._log(
-                        f"[dim][{rb.role.upper()}][/] {pos} [bold]{resp['finding_id']}[/]"
-                        f" [dim]{reason}[/]"
+                        f"[dim][{who}][/] {pos} [bold]{fid}[/] [dim]{reason}[/]"
                     )
                 if rb.updated_verdict not in ("", "UNCHANGED") and rb.updated_verdict != review.verdict:
                     self._log(
                         f"[dim][{rb.role.upper()}][/] verdict updated:"
-                        f" {review.verdict} → [bold]{rb.updated_verdict}[/]"
+                        f" {_vote(review.verdict)} → {_vote(rb.updated_verdict)}"
                     )
                     review.verdict = rb.updated_verdict
             self._paint_verdict(review)
         return rebuttals
 
-    def _finish(self, merged: dict) -> None:
+    def _write_run(
+        self, merged: dict, reviews: list[MemberReview], rebuttals: list[MemberRebuttal]
+    ) -> None:
+        """Persist the full deliberation — the ticker only shows a summary."""
+        import os
+
+        from .council import render_json
+
+        path = self.repo / ".magi" / "last-run.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # self-ignoring: keeps the log out of git status, and out of the
+            # untracked-file scan that builds the next evidence packet
+            (path.parent / ".gitignore").write_text("*\n")
+            path.write_text(render_json(reviews, rebuttals, merged))
+        except OSError as e:
+            self._log(f"[dim]could not write {path}: {e}[/]")
+            return
+        self._log(f"[dim]full run: {os.path.relpath(path)}[/]")  # absolute path wraps
+
+    def _finish(
+        self,
+        merged: dict,
+        reviews: list[MemberReview],
+        rebuttals: list[MemberRebuttal],
+    ) -> None:
         self.result = merged
         self._deliberating = False
         self._inflight = []
@@ -452,8 +503,11 @@ class MagiApp(App):
             self._log("[bold red]blocking:[/] " + "; ".join(merged["blocking_findings"]))
         if merged.get("disputed_findings"):
             self._log("[yellow]disputed (human decision):[/] " + "; ".join(merged["disputed_findings"]))
-        votes = "  ".join(f"{role}:{v}" for role, v in merged["votes"].items())
-        self._log(f"[bold]決議 {rec}[/]  ·  {votes}")
+        votes = "  ".join(
+            f"[dim]{role}:[/]{_vote(v)}" for role, v in merged["votes"].items()
+        )
+        self._log(f"{_vote(rec)} 決議  ·  {votes}")
+        self._write_run(merged, reviews, rebuttals)  # last: the path stays on screen
 
 
 def _init_main(argv: list[str]) -> None:

@@ -145,6 +145,20 @@ Then the panel color shows the verdict: green 可決, red 否決, yellow 保留,
 dark 沈黙. The findings and the rebuttal positions go to the ticker. The
 merged verdict goes to the status bar.
 
+### Plan review
+
+```sh
+magi plan DESIGN.md "goals or constraints"
+```
+
+MAGI can review a proposal document before the implementation starts. The
+members search for gaps, contradictions, unstated assumptions, and risks. A
+plan review does not need a git repository. The council cannot approve a
+plan; the best possible result is HUMAN_REVIEW. A person approves a plan.
+
+The persona and protocol prompts are markdown files in `src/magi/prompts/`.
+Edit them to tune the council.
+
 ### Headless mode for CI
 
 ```sh

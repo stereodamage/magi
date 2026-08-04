@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .backends import BackendError, ClaudeCli, CodexCli, GeminiCli
-from .personas import PERSONAS, PROTOCOL, REBUTTAL_PROTOCOL
+from .personas import system_prompt
 
 _FINDING_SCHEMA = {
     "type": "object",
@@ -165,14 +165,30 @@ def build_packet(repo: Path, task: str | None = None) -> str:
     )
 
 
+def build_plan_packet(doc: Path, context: str | None = None) -> str:
+    context_text = context or (
+        "(no context provided — infer the goals conservatively and raise "
+        "missing context through `questions`)"
+    )
+    return (
+        "=== PROPOSAL PACKET ===\n\n"
+        f"CONTEXT / GOALS / CONSTRAINTS:\n{context_text}\n\n"
+        f"PROPOSAL DOCUMENT — {doc.name}:\n{doc.read_text()}\n\n"
+        "The proposal's directory is available read-only in your working "
+        "directory; inspect existing code there when the proposal refers "
+        "to it."
+    )
+
+
 async def review_member(
     role: str,
     backend,
     packet: str,
     repo: Path,
     timeout: float = 600.0,
+    mode: str = "code",
 ) -> MemberReview:
-    system = PERSONAS[role] + "\n" + PROTOCOL
+    system = system_prompt(role, "review", mode)
     try:
         r = await backend.ask(
             packet, system=system, schema=REVIEW_SCHEMA, cwd=repo, timeout=timeout
@@ -189,9 +205,10 @@ async def deliberate(
     packet: str,
     repo: Path,
     timeout: float = 600.0,
+    mode: str = "code",
 ) -> list[MemberReview]:
     return list(await asyncio.gather(
-        *(review_member(role, b, packet, repo, timeout) for role, b in council.items())
+        *(review_member(role, b, packet, repo, timeout, mode) for role, b in council.items())
     ))
 
 
@@ -228,6 +245,7 @@ async def rebut_member(
     reviews: list[MemberReview],
     repo: Path,
     timeout: float = 600.0,
+    mode: str = "code",
 ) -> MemberRebuttal:
     own = next(r for r in reviews if r.role == role)
     others = [
@@ -235,7 +253,7 @@ async def rebut_member(
         for rr in reviews if rr.role != role
         for f in rr.findings
     ]
-    system = PERSONAS[role] + "\n" + REBUTTAL_PROTOCOL
+    system = system_prompt(role, "rebuttal", mode)
     try:
         r = await backend.ask(
             _rebuttal_prompt(packet, own, others),
@@ -264,16 +282,19 @@ async def rebut(
     reviews: list[MemberReview],
     repo: Path,
     timeout: float = 600.0,
+    mode: str = "code",
 ) -> list[MemberRebuttal]:
     roles = rebuttal_roles(council, reviews)
     return list(await asyncio.gather(
-        *(rebut_member(role, council[role], packet, reviews, repo, timeout) for role in roles)
+        *(rebut_member(role, council[role], packet, reviews, repo, timeout, mode)
+          for role in roles)
     ))
 
 
 def merge(
     reviews: list[MemberReview],
     rebuttals: list[MemberRebuttal] | None = None,
+    mode: str = "code",
 ) -> dict:
     """Asymmetric merge — provisional without rebuttals, final with them.
 
@@ -343,8 +364,12 @@ def merge(
     else:
         rec = "HUMAN_REVIEW"
 
+    if mode == "plan" and rec == "APPROVE":
+        rec = "HUMAN_REVIEW"  # a plan is approved by a person, never by the council
+
     return {
         "recommendation": rec,
+        "mode": mode,
         "blocking_findings": blocking_confirmed,
         "disputed_findings": disputed_findings,
         "votes": votes,
@@ -364,6 +389,8 @@ async def convene(
     task: str | None = None,
     timeout: float = 600.0,
     on_event=None,
+    packet: str | None = None,
+    mode: str = "code",
 ) -> tuple[list[MemberReview], list[MemberRebuttal], dict]:
     """Full protocol: packet → parallel reviews → rebuttal → final merge.
 
@@ -372,11 +399,11 @@ async def convene(
     → ("rebuttal", MemberRebuttal)… → ("merged", dict).
     """
     emit = on_event or (lambda kind, payload: None)
-    packet = build_packet(repo, task)
+    packet = packet or build_packet(repo, task)
     emit("packet", packet)
     reviews: list[MemberReview] = []
     for fut in asyncio.as_completed(
-        [review_member(role, b, packet, repo, timeout) for role, b in council.items()]
+        [review_member(role, b, packet, repo, timeout, mode) for role, b in council.items()]
     ):
         r = await fut
         reviews.append(r)
@@ -386,12 +413,13 @@ async def convene(
     if roles:
         emit("rebuttal_start", roles)
         for fut in asyncio.as_completed(
-            [rebut_member(role, council[role], packet, reviews, repo, timeout) for role in roles]
+            [rebut_member(role, council[role], packet, reviews, repo, timeout, mode)
+             for role in roles]
         ):
             rb = await fut
             rebuttals.append(rb)
             emit("rebuttal", rb)
-    merged = merge(reviews, rebuttals)
+    merged = merge(reviews, rebuttals, mode)
     emit("merged", merged)
     return reviews, rebuttals, merged
 
@@ -453,6 +481,8 @@ def run_headless(
     task: str | None = None,
     as_json: bool = False,
     timeout: float = 600.0,
+    packet: str | None = None,
+    mode: str = "code",
 ) -> int:
     """Run the full protocol without a TUI. Returns the process exit code:
     0 APPROVE · 1 REQUEST_CHANGES · 2 HUMAN_REVIEW · 3 error.
@@ -462,7 +492,7 @@ def run_headless(
     import sys
     import time
 
-    if not is_git_repo(repo):
+    if packet is None and not is_git_repo(repo):
         print(f"magi: not a git repository: {repo}", file=sys.stderr)
         return EXIT_ERROR
     names = ", ".join(f"{role.upper()}({b.name})" for role, b in council.items())
@@ -489,7 +519,7 @@ def run_headless(
         print(f"[T+{time.monotonic() - t0:4.0f}s] {msg}", file=sys.stderr, flush=True)
 
     reviews, rebuttals, merged = asyncio.run(
-        convene(council, repo, task, timeout, on_event=emit)
+        convene(council, repo, task, timeout, on_event=emit, packet=packet, mode=mode)
     )
     render = render_json if as_json else render_text
     print(render(reviews, rebuttals, merged))

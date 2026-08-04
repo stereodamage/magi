@@ -166,12 +166,16 @@ class MagiApp(App):
         repo: Path = Path("."),
         task: str | None = None,
         packet: str | None = None,
+        mode: str = "code",
+        autostart: bool = False,
     ) -> None:
         super().__init__()
         self.council = council or default_council()
         self.repo = Path(repo).resolve()
         self.task_text = task
         self.packet = packet
+        self.mode = mode
+        self.autostart = autostart
         self.result: dict | None = None
         self._t0 = time.monotonic()
         self._frame = 0
@@ -209,7 +213,7 @@ class MagiApp(App):
             self._paint_standby(role)
         self.set_interval(0.25, self._tick)
         self.query_one("#taskinput", Input).focus()
-        if self.task_text:  # explicit CLI intent: convene now
+        if self.task_text or self.autostart:  # explicit CLI intent: convene now
             self._convene()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -312,7 +316,8 @@ class MagiApp(App):
         )
         self._refresh_meta()
         coros = [
-            review_member(role, b, packet, self.repo) for role, b in self.council.items()
+            review_member(role, b, packet, self.repo, mode=self.mode)
+            for role, b in self.council.items()
         ]
         reviews: list[MemberReview] = []
         for fut in asyncio.as_completed(coros):
@@ -330,7 +335,7 @@ class MagiApp(App):
                     f" [dim](conf {f['confidence']:.2f})[/]{loc}"
                 )
         rebuttals = await self._rebut(packet, reviews)
-        self._finish(merge(reviews, rebuttals))
+        self._finish(merge(reviews, rebuttals, self.mode))
 
     async def _rebut(self, packet: str, reviews: list[MemberReview]) -> list[MemberRebuttal]:
         roles = rebuttal_roles(self.council, reviews)
@@ -345,7 +350,7 @@ class MagiApp(App):
         by_role = {r.role: r for r in reviews}
         rebuttals: list[MemberRebuttal] = []
         coros = [
-            rebut_member(role, self.council[role], packet, reviews, self.repo)
+            rebut_member(role, self.council[role], packet, reviews, self.repo, mode=self.mode)
             for role in roles
         ]
         for fut in asyncio.as_completed(coros):
@@ -411,6 +416,43 @@ def _init_main(argv: list[str]) -> None:
     print(f"wrote {dest}:\n\n{text}")
 
 
+def _plan_main(argv: list[str]) -> None:
+    import argparse
+    import sys
+
+    from .config import load_council
+    from .council import EXIT_ERROR, build_plan_packet, run_headless
+
+    ap = argparse.ArgumentParser(
+        prog="magi plan",
+        description="review a plan / design / idea document before implementation",
+    )
+    ap.add_argument("document", help="markdown (or text) proposal document")
+    ap.add_argument("context", nargs="*", help="goals / constraints for the proposal")
+    ap.add_argument("--report", action="store_true", help="headless text report")
+    ap.add_argument("--json", action="store_true", help="headless JSON result")
+    args = ap.parse_args(argv)
+    doc = Path(args.document).resolve()
+    if not doc.is_file():
+        print(f"magi plan: no such document: {doc}", file=sys.stderr)
+        raise SystemExit(EXIT_ERROR)
+    context = " ".join(args.context) or None
+    try:
+        council = load_council(doc.parent)
+    except ValueError as e:
+        print(f"magi: config error: {e}", file=sys.stderr)
+        raise SystemExit(EXIT_ERROR)
+    packet = build_plan_packet(doc, context)
+    if args.json or args.report or not sys.stdout.isatty():
+        raise SystemExit(run_headless(
+            council, doc.parent, context, as_json=args.json, packet=packet, mode="plan",
+        ))
+    MagiApp(
+        council=council, repo=doc.parent, task=context,
+        packet=packet, mode="plan", autostart=True,
+    ).run()
+
+
 def main() -> None:
     import argparse
     import sys
@@ -419,6 +461,8 @@ def main() -> None:
 
     if sys.argv[1:2] == ["init"]:
         return _init_main(sys.argv[2:])
+    if sys.argv[1:2] == ["plan"]:
+        return _plan_main(sys.argv[2:])
 
     ap = argparse.ArgumentParser(prog="magi", description="MAGI review council")
     ap.add_argument("repo", nargs="?", default=".", help="repository to review")

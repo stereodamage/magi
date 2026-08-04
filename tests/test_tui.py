@@ -115,10 +115,10 @@ async def test_model_line_on_panel_floor_and_input_locked_while_deliberating():
         assert app.query_one("#taskinput").disabled  # no edits mid-session
         panel = app.query_one("#balthasar")
         body, model = panel.query_one(".mbody"), panel.query_one(".mmodel")
-        # model line is the last row inside the border, below the body
+        # model line is the last row of the borderless panel, below the body
         assert str(model.render()).startswith("m-balthasar")
         assert model.region.y == body.region.y + body.region.height
-        assert model.region.bottom == panel.region.bottom - 1  # border row
+        assert model.region.bottom == panel.region.bottom
         await _wait_result(app, pilot)
         assert not app.query_one("#taskinput").disabled
         # verdict color reaches the model line through the container

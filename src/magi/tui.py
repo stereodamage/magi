@@ -37,45 +37,56 @@ from .council import (
     review_member,
 )
 
+# the reference screen: plain bold caps, tight, with a katakana middle dot
 TITLES = {
-    "melchior": "MELCHIOR • 1",
-    "balthasar": "BALTHASAR • 2",
-    "casper": "CASPER • 3",
+    "melchior": "MELCHIOR・1",
+    "balthasar": "BALTHASAR・2",
+    "casper": "CASPER・3",
 }
 
+# ponytail: 2-line half-block font, hand-drawn — 4 letters don't need pyfiglet
+_MAGI_BIG = (
+    "█▀▄▀█  ▄▀█  █▀▀  █\n"
+    "█ ▀ █  █▀█  █▄█  █"
+)
+
 VERDICTS = {
-    "APPROVE": ("可 決", "approve"),
-    "REQUEST_CHANGES": ("否 決", "reject"),
-    "ABSTAIN": ("保 留", "abstain"),
-    "OFFLINE": ("沈 黙", "offline"),
+    "APPROVE": ("可 決 / APPROVED", "approve"),
+    "REQUEST_CHANGES": ("否 決 / REJECTED", "reject"),
+    "ABSTAIN": ("保 留 / ABSTAIN", "abstain"),
+    "OFFLINE": ("沈 黙 / SILENT", "offline"),
 }
 
 _WAVE = "░▒▓█▓▒░ "
-_PHASE_LABEL = {"review": "審 議 中", "rebuttal": "反 論 中"}
+_PHASE_LABEL = {
+    "review": "審 議 中 / DELIBERATING",
+    "rebuttal": "反 論 中 / REBUTTAL",
+}
 _POSITION_MARKUP = {
-    "ACCEPT": "[green]ACCEPT[/]",
-    "PARTIALLY_ACCEPT": "[yellow]PARTIALLY_ACCEPT[/]",
-    "CHALLENGE": "[bold red]CHALLENGE[/]",
+    "ACCEPT": "[#46b87c]ACCEPT[/]",
+    "PARTIALLY_ACCEPT": "[#d4b546]PARTIALLY_ACCEPT[/]",
+    "CHALLENGE": "[bold #d4655a]CHALLENGE[/]",
     "OUT_OF_SCOPE": "[dim]OUT_OF_SCOPE[/]",
 }
 _SEV_MARKUP = {
-    "blocking": "[bold white on red] BLOCKING [/]",
-    "high": "[bold red]high[/]",
-    "medium": "[yellow]medium[/]",
+    "blocking": "[bold #f2e9dc on #9e352c] BLOCKING [/]",
+    "high": "[bold #d4655a]high[/]",
+    "medium": "[#d4b546]medium[/]",
     "low": "[dim]low[/]",
 }
-# same colors the member panels use, so the ticker and the board agree
+# same hues as the member slabs, brighter: text on dark needs more luminance
+# than a filled panel, or the ticker becomes the dimmest thing on screen
 _VERDICT_COLOR = {
-    "APPROVE": "#00e070",
-    "REQUEST_CHANGES": "#ff4d4d",
-    "ABSTAIN": "#ffd23f",
+    "APPROVE": "#46b87c",
+    "REQUEST_CHANGES": "#d4655a",
+    "ABSTAIN": "#d4b546",
     "OFFLINE": "#5a5a5a",
-    "HUMAN_REVIEW": "#ffd23f",
+    "HUMAN_REVIEW": "#d4b546",
 }
 
 
 def _vote(verdict: str) -> str:
-    return f"[bold {_VERDICT_COLOR.get(verdict, '#ffa028')}]{verdict}[/]"
+    return f"[bold {_VERDICT_COLOR.get(verdict, '#cf9440')}]{verdict}[/]"
 
 
 class MagiApp(App):
@@ -88,7 +99,7 @@ class MagiApp(App):
     CSS = """
     Screen {
         background: #0a0a06;
-        color: #ffa028;
+        color: #cf9440;
         align: center middle;
     }
     #console {
@@ -108,23 +119,23 @@ class MagiApp(App):
     #leftcol, #rightcol { height: 100%; }
     .jheader {
         height: 3;
-        border-top: double #ff7b00;
-        border-bottom: double #ff7b00;
-        color: #ff7b00;
+        border-top: double #2e8f5c;
+        border-bottom: double #2e8f5c;
+        color: #cc7418;
         text-style: bold;
         content-align: center middle;
         text-align: center;
     }
     #meta {
         padding: 1 0 0 1;
-        color: #d9922f;
+        color: #cf9440;
         height: 1fr;
     }
     #info {
-        border: heavy #ffa028;
-        color: #ffa028;
+        background: #b9d2dc;
+        color: #14435c;
         text-style: bold;
-        width: 12;
+        width: 16;
         height: 3;
         margin: 1 1 0 0;
         content-align: center middle;
@@ -132,15 +143,19 @@ class MagiApp(App):
     }
     #rightcol { align-horizontal: right; }
     #magi {
-        color: #ff7b00;
+        color: #cc7418;
         text-style: bold;
         content-align: center middle;
         text-align: center;
     }
+    /* canonical: solid sky-blue slabs, dark text, no border. The diagonal
+       panel cuts from the show can't happen in rectangular cells. */
     .member {
-        border: heavy #ff7b00;
-        color: #ffa028;
+        background: #58a5c4;
+        color: #0c1d26;
+        text-style: bold;
         height: 100%;
+        padding: 0 1;
     }
     /* body takes the slack so the model line sits on the panel floor.
        Neither child sets `color`: both inherit the verdict color from .member. */
@@ -155,39 +170,39 @@ class MagiApp(App):
         text-style: dim;
     }
     #magi { height: 100%; }
-    .member.standby { border: heavy #7a4a08; color: #8a6a30; }
-    .member.approve  { border: heavy #00e070; color: #00e070; background: #001a0c; }
-    .member.reject   { border: heavy #ff2b2b; color: #ff4d4d; background: #1c0202; }
-    .member.abstain  { border: heavy #ffd23f; color: #ffd23f; background: #1a1502; }
-    .member.offline  { border: heavy #3a3a3a; color: #5a5a5a; background: #0d0d0d; }
+    .member.standby { background: #40758d; color: #0c1d26; }
+    .member.approve  { background: #3fa06d; color: #06200f; }
+    .member.reject   { background: #c04e44; color: #200604; }
+    .member.abstain  { background: #cbb04e; color: #201a05; }
+    .member.offline  { background: #1c1c1c; color: #5a5a5a; }
     #log {
         height: 2fr;
         min-height: 4;
-        border: heavy #ff7b00;
+        border: heavy #a86a28;
         background: #0a0a06;
-        color: #d9922f;
+        color: #cf9440;
     }
     #qbar { height: 3; }
     #qlabel {
         width: auto;
         padding: 1 1 0 2;
-        color: #ff7b00;
+        color: #cc7418;
         text-style: bold;
     }
     #taskinput {
         width: 1fr;
-        border: heavy #ff7b00;
+        border: heavy #a86a28;
         background: #0a0a06;
-        color: #ffa028;
+        color: #cf9440;
     }
     #statusbar {
         height: 1;
         padding: 0 1;
-        color: #ff7b00;
-        background: #1a1206;
+        color: #cc7418;
+        background: #171006;
     }
-    #statusbar.approve { color: #00e070; }
-    #statusbar.reject  { color: #ff4d4d; }
+    #statusbar.approve { color: #46b87c; }
+    #statusbar.reject  { color: #d4655a; }
     """
 
     def __init__(
@@ -222,14 +237,14 @@ class MagiApp(App):
         with Vertical(id="console"):
             with Grid(id="board"):
                 with Vertical(id="leftcol"):
-                    yield Static("質  問", classes="jheader")
+                    yield Static("質 問 / QUESTION", classes="jheader")
                     yield Static(self._meta_text(), id="meta")
                 yield from self._member_panel("balthasar")
                 with Vertical(id="rightcol"):
-                    yield Static("解  決", classes="jheader")
-                    yield Static("情 報", id="info")
+                    yield Static("解 決 / RESOLUTION", classes="jheader")
+                    yield Static("情 報 / INFO", id="info")
                 yield from self._member_panel("casper")
-                yield Static("M A G I", id="magi")
+                yield Static(_MAGI_BIG, id="magi")
                 yield from self._member_panel("melchior")
             yield RichLog(id="log", wrap=True, markup=True)
             with Horizontal(id="qbar"):
@@ -288,25 +303,27 @@ class MagiApp(App):
         return self.query_one(f"#{role}-body", Static)
 
     def _paint_standby(self, role: str) -> None:
-        self._body(role).update(f"{TITLES[role]}\n\n—  S T A N D B Y  —")
+        self._body(role).update(f"[bold]{TITLES[role]}[/]\n\n—  S T A N D B Y  —")
 
     def _paint_running(self, role: str) -> None:
         wave = _WAVE[self._frame % len(_WAVE):] + _WAVE[: self._frame % len(_WAVE)]
-        label = _PHASE_LABEL.get(self._phase, "審 議 中")
+        label = _PHASE_LABEL.get(self._phase, _PHASE_LABEL["review"])
+        # label above the wave: side panels are too narrow to flank it
         self._body(role).update(
-            f"{TITLES[role]}\n\n{wave}  {label}  {wave[::-1]}"
+            f"[bold]{TITLES[role]}[/]\n\n{label}\n{wave}{wave[::-1]}"
         )
 
     def _paint_verdict(self, r: MemberReview) -> None:
-        label, css = VERDICTS.get(r.verdict, ("？", "abstain"))
+        # unknown verdict falls back to the raw word, so nothing renders as "？"
+        label, css = VERDICTS.get(r.verdict, (r.verdict, "abstain"))
         panel = self.query_one(f"#{r.role}", Vertical)
         panel.remove_class("approve", "reject", "abstain", "offline")
         panel.add_class(css)
         n = len(r.findings)
         detail = f"{n} finding{'s' if n != 1 else ''}" if not r.error else "no response"
         self._body(r.role).update(
-            f"{TITLES[r.role]}\n\n"
-            f"{label}\n{r.verdict}  ·  {detail}  ·  {r.duration_s:.0f}s"
+            f"[bold]{TITLES[r.role]}[/]\n\n"
+            f"[bold]{label}[/]\n{detail}  ·  {r.duration_s:.0f}s"
         )
 
     def _tick(self) -> None:
@@ -362,7 +379,7 @@ class MagiApp(App):
         self._inflight = []
         if self._worker is not None:
             self._worker.cancel()
-        self._log("[bold red]中 止[/] — council stopped by the operator")
+        self._log("[bold red]中 止 / ABORTED[/] — council stopped by the operator")
         self._deliberating = False
         self._pending.clear()
         self._refresh_meta()
@@ -419,7 +436,7 @@ class MagiApp(App):
         self._phase = "rebuttal"
         self._pending = set(roles)
         self.query_one("#log", RichLog).write(
-            Rule("反論 rebuttal — findings cross-examined", style="#5a4a20")
+            Rule("反 論 / REBUTTAL — findings cross-examined", style="#5a4a20")
         )
         for role in roles:
             panel = self.query_one(f"#{role}", Vertical)
@@ -498,7 +515,7 @@ class MagiApp(App):
         bar = self.query_one("#statusbar", Static)
         bar.add_class("approve" if rec == "APPROVE" else "reject")
         elapsed = time.monotonic() - self._t0
-        bar.update(f"決 議 — {rec}   (T+{elapsed:.0f}s)")
+        bar.update(f"決 議 / RESOLUTION — {rec}   (T+{elapsed:.0f}s)")
         if merged["blocking_findings"]:
             self._log("[bold red]blocking:[/] " + "; ".join(merged["blocking_findings"]))
         if merged.get("disputed_findings"):
@@ -506,7 +523,7 @@ class MagiApp(App):
         votes = "  ".join(
             f"[dim]{role}:[/]{_vote(v)}" for role, v in merged["votes"].items()
         )
-        self._log(f"{_vote(rec)} 決議  ·  {votes}")
+        self._log(f"{_vote(rec)} 決 議 / resolution  ·  {votes}")
         self._write_run(merged, reviews, rebuttals)  # last: the path stays on screen
 
 

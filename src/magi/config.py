@@ -34,8 +34,11 @@ def _member(role: str, spec: dict):
             f"council.{role}: unknown backend {backend!r} "
             f"(expected one of: {', '.join(BACKENDS)})"
         )
-    kwargs = {k: spec[k] for k in ("model", "effort") if k in spec}
-    return cls(**kwargs)
+    kwargs = {k: v for k, v in spec.items() if k != "backend"}
+    try:  # any backend field is settable; a typo or wrong-backend key lands here
+        return cls(**kwargs)
+    except TypeError as e:
+        raise ValueError(f"council.{role}: {e}") from e
 
 
 def load_council(repo: Path) -> dict[str, object]:

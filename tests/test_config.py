@@ -37,6 +37,23 @@ def test_unknown_backend_rejected(tmp_path, monkeypatch):
         load_council(tmp_path)
 
 
+def test_backend_field_passthrough(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    (tmp_path / "magi.toml").write_text(
+        '[council.melchior]\nbackend = "codex"\nservice_tier = "priority"\n'
+    )
+    assert load_council(tmp_path)["melchior"].service_tier == "priority"
+
+
+def test_field_unknown_to_backend_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
+    (tmp_path / "magi.toml").write_text(
+        '[council.melchior]\nbackend = "claude"\nservice_tier = "priority"\n'
+    )
+    with pytest.raises(ValueError, match="council.melchior"):
+        load_council(tmp_path)
+
+
 def test_unknown_role_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "absent.toml"))
     (tmp_path / "magi.toml").write_text('[council.overlord]\nbackend = "claude"\n')

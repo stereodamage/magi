@@ -132,6 +132,7 @@ class CodexCli:
 
     model: str | None = None  # None = user's configured default
     effort: str | None = None  # minimal | low | medium | high | xhigh
+    service_tier: str | None = None  # "priority" = the "Fast" tier (1.5x speed, more usage)
     sandbox: str = "read-only"  # read-only | workspace-write | danger-full-access
     pristine: bool = True  # skip AGENTS.md project docs
     name: str = "codex"
@@ -151,6 +152,10 @@ class CodexCli:
             cmd += ["-m", self.model]
         if self.effort:
             cmd += ["-c", f"model_reasoning_effort={self.effort}"]
+        if self.service_tier:
+            # A tier the model does not advertise is only a warning, not an error:
+            # codex drops it and the run proceeds at the normal tier.
+            cmd += ["-c", f'service_tier="{self.service_tier}"']
         if schemafile:
             cmd += ["--output-schema", str(schemafile)]
         return cmd

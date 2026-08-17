@@ -217,7 +217,8 @@ _PACKET_CAP = 2_000_000  # bytes of diff per packet, across all sources
 def _truncate(diff: str, cap: int = _PACKET_CAP) -> str:
     if len(diff) <= cap:
         return diff
-    return f"{diff[:cap]}\n... truncated at {cap} bytes — the scope below is incomplete\n"
+    # the marker lands at the end of the diff, so it names the whole scope
+    return f"{diff[:cap]}\n... truncated at {cap} bytes — this change is incomplete\n"
 
 
 def _untracked_diffs(repo: Path, budget: int = _PACKET_CAP) -> str:

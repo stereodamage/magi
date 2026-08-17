@@ -114,3 +114,16 @@ def test_init_output_roundtrips_through_loader(tmp_path, monkeypatch):
     assert council["melchior"].effort == "xhigh"
     assert isinstance(council["casper"], ClaudeCli)
     assert council["casper"].model == "claude-fable-5"
+
+
+def test_render_config_writes_toml_scalars():
+    """A bool must stay a bool. `pristine = "False"` is a truthy string, and
+    it would turn the setting silently on."""
+    import tomllib
+
+    from magi.config import ROLES, render_config
+
+    text = render_config({r: {"backend": "claude", "pristine": False} for r in ROLES})
+    melchior = tomllib.loads(text)["council"]["melchior"]
+    assert melchior["pristine"] is False
+    assert melchior["backend"] == "claude"

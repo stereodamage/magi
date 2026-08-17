@@ -87,7 +87,7 @@ def test_finding_view_and_authorship():
         MR("balthasar", "REQUEST_CHANGES", [finding("low", "B-003")]),
         MR("melchior", "APPROVE", [finding("high", "M-001")]),
     ]
-    assert finding_authors(reviews) == {"B-003": "balthasar", "M-001": "melchior"}
+    assert finding_authors(reviews) == {"B1": "balthasar", "M1": "melchior"}
 
 
 def test_text_report_names_the_finding_author():
@@ -99,11 +99,11 @@ def test_text_report_names_the_finding_author():
     ]
     rebuttals = [
         MemberRebuttal("melchior", "codex", "REQUEST_CHANGES",
-                       [position("B-003", "CHALLENGE", "no path")]),
+                       [position("B1", "CHALLENGE", "no path")]),
     ]
     report = render_text(reviews, rebuttals, merge(reviews, rebuttals))
     # a position targets someone else's finding — the report must say whose
-    assert "B-003 (by balthasar)" in report
+    assert "B1 (by balthasar)" in report
 
 
 async def test_cancel_kills_the_member_process():
@@ -194,7 +194,7 @@ def _merged(*verdict_findings):
 def test_blocking_finding_vetoes_even_unanimous_approval():
     got = _merged(("APPROVE", [finding("blocking")]), ("APPROVE", []), ("APPROVE", []))
     assert got["recommendation"] == "REQUEST_CHANGES"
-    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["blocking_findings"] == ["M1 t"]
 
 
 def test_unanimous_approval():
@@ -256,11 +256,11 @@ def test_rebut_prompt_carries_own_review_and_others_findings():
     reviews = run_council(**council)
     rebuttals = asyncio.run(rebut(council, "PACKET", reviews, Path(".")))
     assert {rb.role for rb in rebuttals} == {"melchior", "balthasar"}
-    # melchior's second call: sees B-001 as target, own M-001 only as reference
+    # melchior's second call: sees B1 as target, own M1 only as reference
     rebut_call = m.calls[1]
     assert rebut_call["schema"] is REBUTTAL_SCHEMA
     assert "FINDINGS TO RESPOND TO" in rebut_call["prompt"]
-    assert '"B-001"' in rebut_call["prompt"].split("FINDINGS TO RESPOND TO")[1]
+    assert '"B1"' in rebut_call["prompt"].split("FINDINGS TO RESPOND TO")[1]
     assert "YOUR ORIGINAL REVIEW" in rebut_call["prompt"]
     assert REBUTTAL_PROTOCOL in rebut_call["system"]
 
@@ -272,13 +272,13 @@ def test_disputed_blocking_escalates_to_human():
         MR("casper", "APPROVE"),
     ]
     rebuttals = [
-        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
-        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M1", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M1", "CHALLENGE")]),
     ]
     got = merge(reviews, rebuttals)
     assert got["recommendation"] == "HUMAN_REVIEW"
     assert got["blocking_findings"] == []
-    assert got["disputed_findings"] == ["M-001 t"]
+    assert got["disputed_findings"] == ["M1 t"]
 
 
 def test_supported_blocking_still_vetoes_despite_challenge():
@@ -288,12 +288,12 @@ def test_supported_blocking_still_vetoes_despite_challenge():
         MR("casper", "APPROVE"),
     ]
     rebuttals = [
-        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
-        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "PARTIALLY_ACCEPT")]),
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M1", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M1", "PARTIALLY_ACCEPT")]),
     ]
     got = merge(reviews, rebuttals)
     assert got["recommendation"] == "REQUEST_CHANGES"
-    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["blocking_findings"] == ["M1 t"]
     assert got["disputed_findings"] == []
 
 
@@ -304,12 +304,12 @@ def test_author_cannot_support_own_finding():
         MR("casper", "APPROVE"),
     ]
     rebuttals = [
-        MemberRebuttal("melchior", "fake", "UNCHANGED", [position("M-001", "ACCEPT")]),
-        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
-        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
+        MemberRebuttal("melchior", "fake", "UNCHANGED", [position("M1", "ACCEPT")]),
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M1", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M1", "CHALLENGE")]),
     ]
     got = merge(reviews, rebuttals)
-    assert got["disputed_findings"] == ["M-001 t"]
+    assert got["disputed_findings"] == ["M1 t"]
     assert got["recommendation"] == "HUMAN_REVIEW"
 
 
@@ -337,12 +337,12 @@ def test_lone_challenge_cannot_disarm_blocking_veto():
         MR("casper", "APPROVE"),
     ]
     rebuttals = [
-        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M-001", "CHALLENGE")]),
-        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M-001", "OUT_OF_SCOPE")]),
+        MemberRebuttal("balthasar", "fake", "UNCHANGED", [position("M1", "CHALLENGE")]),
+        MemberRebuttal("casper", "fake", "UNCHANGED", [position("M1", "OUT_OF_SCOPE")]),
     ]
     got = merge(reviews, rebuttals)
     assert got["disputed_findings"] == []
-    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["blocking_findings"] == ["M1 t"]
     assert got["recommendation"] == "REQUEST_CHANGES"
 
     # same with casper omitting a response for M-001 entirely
@@ -366,10 +366,10 @@ def test_failed_rebuttal_never_weakens_findings():
     ]
     rebuttals = [
         MemberRebuttal("balthasar", "fake", error="timeout",
-                       responses=[position("M-001", "CHALLENGE")]),
+                       responses=[position("M1", "CHALLENGE")]),
     ]
     got = merge(reviews, rebuttals)
-    assert got["blocking_findings"] == ["M-001 t"]
+    assert got["blocking_findings"] == ["M1 t"]
     assert got["recommendation"] == "REQUEST_CHANGES"
 
 
@@ -410,7 +410,7 @@ def test_run_headless_exit_codes_and_json(repo, capsys):
         "casper": FakeBackend(review()),
     }
     assert run_headless(blocking, repo) == 1
-    assert "M-001" in capsys.readouterr().out
+    assert "M1" in capsys.readouterr().out
 
     lone_objection = {
         "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high")])),
@@ -506,3 +506,93 @@ def test_packet_works_in_repo_with_no_commits(tmp_path):
     packet = build_packet(tmp_path, task="first file")
     assert "+a = 1" in packet
     assert "untracked files included" in packet
+
+
+# --- defects found by review ---------------------------------------------------
+
+def test_two_members_may_pick_the_same_finding_id():
+    """Members number their own findings. Two that choose one id must keep two
+    findings, or a blocking finding loses its veto with no trace in the report."""
+    reviews = [
+        MR("melchior", "APPROVE", [finding("low", "F1")]),
+        MR("balthasar", "REQUEST_CHANGES", [finding("blocking", "F1")]),
+        MR("casper", "APPROVE"),
+    ]
+    got = merge(reviews)
+    assert got["blocking_findings"] == ["B1 t"]
+    assert got["recommendation"] == "REQUEST_CHANGES"
+
+
+def test_member_crash_takes_one_seat_offline():
+    """Any failure is that member's failure. A vendor CLI returning junk must
+    not end the council: headless would exit 1, which CI reads as
+    REQUEST_CHANGES."""
+    class Junk:
+        name, model = "junk", "j"
+
+        async def ask(self, *a, **k):
+            raise RuntimeError("envelope was a list")  # not a BackendError
+
+    reviews = run_council(melchior=Junk(), balthasar=FakeBackend(review()))
+    by_role = {r.role: r for r in reviews}
+    assert by_role["melchior"].verdict == "OFFLINE"
+    assert "envelope was a list" in by_role["melchior"].error
+    assert by_role["balthasar"].verdict == "APPROVE"
+
+
+def test_empty_packet_is_refused(tmp_path):
+    """No changes and no commits reviews nothing, and nothing reads as APPROVE."""
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    with pytest.raises(ValueError, match="nothing to review"):
+        build_packet(tmp_path)
+
+
+def test_packet_budget_stops_the_untracked_scan(repo):
+    """A repository that fails to ignore its build output holds thousands of
+    small files. Each one clears the per-file cap; together they must not."""
+    for i in range(25):
+        (repo / f"blob{i}.txt").write_text("x" * 99_000)  # under _UNTRACKED_CAP
+    packet = build_packet(repo)
+    assert len(packet) < 2_500_000
+    # a cut scope is never silent: the members must know they saw a part
+    assert "truncated at" in packet
+
+
+def test_run_headless_reports_an_error_as_exit_3(tmp_path, capsys):
+    """Exit 1 means REQUEST_CHANGES. A failure that reviewed nothing must not
+    claim it."""
+    from magi.council import EXIT_ERROR, run_headless
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True)
+    council = {"melchior": FakeBackend(review())}
+    assert run_headless(council, tmp_path) == EXIT_ERROR
+    assert "nothing to review" in capsys.readouterr().err
+
+
+def test_saved_run_keeps_the_packet_and_the_raw_replies(repo, capsys):
+    """The saved run is the research record: the packet the members read, and
+    each reply as the model wrote it."""
+    from magi.backends import BackendError
+    from magi.council import run_headless
+
+    (repo / "a.py").write_text("x = 5\n")
+
+    class Garbled:
+        name, model = "codex", "g"
+
+        async def ask(self, *a, **k):
+            raise BackendError("expected JSON", raw="I think it is fine, actually")
+
+    run_headless({
+        "melchior": Garbled(),
+        "balthasar": FakeBackend(review()),
+        "casper": FakeBackend(review()),
+    }, repo)
+    capsys.readouterr()
+    saved = json.loads((repo / ".magi" / "last-run.json").read_text())
+    assert "+x = 5" in saved["packet"]
+    by_role = {r["role"]: r for r in saved["reviews"]}
+    assert by_role["balthasar"]["raw_text"].startswith("{")  # the reply as written
+    # the reply that failed the schema is the one worth studying, so keep it whole
+    assert by_role["melchior"]["raw_text"] == "I think it is fine, actually"
+    assert len(list((repo / ".magi" / "runs").glob("*.json"))) == 1

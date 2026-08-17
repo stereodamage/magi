@@ -70,26 +70,26 @@ async def test_cli_task_convenes_and_merges():
 async def test_rebuttal_updates_verdict_and_panel():
     council = {
         "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high", "M-001")])),
-        # balthasar challenges M-001 and concedes nothing else; casper accepts it
+        # balthasar challenges M1 and concedes nothing else; casper accepts it
         "balthasar": FakeBackend(
             review("APPROVE"),
-            rebuttal_reply=rebuttal(responses=[position("M-001", "CHALLENGE")]),
+            rebuttal_reply=rebuttal(responses=[position("M1", "CHALLENGE")]),
         ),
         "casper": FakeBackend(
             review("REQUEST_CHANGES", [finding("blocking", "C-001")]),
-            rebuttal_reply=rebuttal(responses=[position("M-001", "ACCEPT")]),
+            rebuttal_reply=rebuttal(responses=[position("M1", "ACCEPT")]),
         ),
     }
-    # melchior concedes its own verdict after seeing C-001
+    # melchior concedes its own verdict after seeing C1
     council["melchior"].rebuttal_reply = rebuttal(
-        "APPROVE", [position("C-001", "ACCEPT")]
+        "APPROVE", [position("C1", "ACCEPT")]
     )
     app = MagiApp(council=council, packet="PACKET", task="go")
     async with app.run_test(size=(100, 32)) as pilot:
         await _wait_result(app, pilot)
-        # C-001 accepted by melchior → confirmed blocking → veto
+        # C1 accepted by melchior → confirmed blocking → veto
         assert app.result["recommendation"] == "REQUEST_CHANGES"
-        assert app.result["blocking_findings"] == ["C-001 t"]
+        assert app.result["blocking_findings"] == ["C1 t"]
         # melchior's updated verdict reflected in votes and panel
         assert app.result["votes"]["melchior"] == "APPROVE"
         assert app.query_one("#melchior").has_class("approve")
@@ -131,7 +131,7 @@ async def test_rebuttal_lines_name_the_finding_author():
         "melchior": FakeBackend(
             review("APPROVE"),
             rebuttal_reply=rebuttal("REQUEST_CHANGES",
-                                    [position("B-003", "CHALLENGE", "no path")]),
+                                    [position("B1", "CHALLENGE", "no path")]),
         ),
         "casper": FakeBackend(review("APPROVE")),
     }
@@ -140,7 +140,7 @@ async def test_rebuttal_lines_name_the_finding_author():
         await _wait_result(app, pilot)
         ticker = [line.text for line in app.query_one("#log").lines]
     # a position names the member it targets; a verdict change speaks for itself
-    assert any("[MELCHIOR → BALTHASAR] CHALLENGE B-003" in t for t in ticker)
+    assert any("[MELCHIOR → BALTHASAR] CHALLENGE B1" in t for t in ticker)
     assert any(t.startswith("[MELCHIOR] verdict updated:") for t in ticker)
 
 
@@ -177,7 +177,7 @@ async def test_finish_writes_the_full_run_to_disk(tmp_path):
         "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high", "M-001")])),
         "balthasar": FakeBackend(
             review("APPROVE"),
-            rebuttal_reply=rebuttal(responses=[position("M-001", "CHALLENGE")]),
+            rebuttal_reply=rebuttal(responses=[position("M1", "CHALLENGE")]),
         ),
         "casper": FakeBackend(review("APPROVE")),
     }
@@ -188,7 +188,7 @@ async def test_finish_writes_the_full_run_to_disk(tmp_path):
     assert run["recommendation"] == app.result["recommendation"]
     assert {r["role"] for r in run["reviews"]} == set(council)
     by_role = {r["role"]: r for r in run["reviews"]}
-    assert by_role["melchior"]["review"]["findings"][0]["id"] == "M-001"
+    assert by_role["melchior"]["review"]["findings"][0]["id"] == "M1"
     assert run["rebuttals"], "rebuttal round must be recorded too"
     # self-ignoring, so the log never lands in the next evidence packet
     assert (tmp_path / ".magi" / ".gitignore").read_text() == "*\n"
@@ -205,7 +205,7 @@ async def test_long_rebuttal_reason_wraps_instead_of_truncating():
         "melchior": FakeBackend(review("REQUEST_CHANGES", [finding("high", "M-001")])),
         "balthasar": FakeBackend(
             review("APPROVE"),
-            rebuttal_reply=rebuttal(responses=[position("M-001", "CHALLENGE", reason)]),
+            rebuttal_reply=rebuttal(responses=[position("M1", "CHALLENGE", reason)]),
         ),
         "casper": FakeBackend(review("APPROVE")),
     }

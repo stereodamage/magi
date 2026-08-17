@@ -41,7 +41,8 @@ class FakeBackend:
         self.rebuttal_reply = rebuttal_reply or rebuttal()
         self.calls = []
 
-    async def ask(self, prompt, *, system=None, schema=None, cwd=None, timeout=0.0):
+    async def ask(self, prompt, *, system=None, schema=None, cwd=None, timeout=0.0,
+                  on_progress=None):
         self.calls.append({"prompt": prompt, "system": system, "schema": schema, "cwd": cwd})
         if self.fail:
             raise BackendError("boom")

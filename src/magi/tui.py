@@ -16,9 +16,11 @@ import time
 from pathlib import Path
 
 from rich.rule import Rule
+from textual.actions import SkipAction
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
+from textual.selection import Selection
 from textual.widgets import Input, RichLog, Static
 
 from .council import (
@@ -86,12 +88,28 @@ def _vote(verdict: str) -> str:
     return f"[bold {_VERDICT_COLOR.get(verdict, '#cf9440')}]{verdict}[/]"
 
 
+class Ticker(RichLog):
+    """RichLog the mouse can select.
+
+    Textual pulls a selection out of the widget's render, and takes it only
+    when that render is Text or Content (widget.py, Widget.get_selection).
+    RichLog renders a RichVisual, so the base class finds nothing and the
+    findings on screen cannot be copied. The strips already carry the text.
+    """
+
+    def get_selection(self, selection: Selection) -> tuple[str, str] | None:
+        return selection.extract("\n".join(s.text for s in self.lines)), "\n"
+
+
 class MagiApp(App):
     TITLE = "MAGI SYSTEM"
 
-    # priority: beats the focused Input's ctrl+c binding. ctrl+q still quits.
-    BINDINGS = [Binding("ctrl+c", "stop_council", "stop the council",
-                        priority=True, show=False)]
+    # priority: beats the focused Input's own bindings. ctrl+q still quits.
+    BINDINGS = [
+        Binding("ctrl+c", "stop_council", "stop the council",
+                priority=True, show=False),
+        Binding("y", "yank", "copy the selection", priority=True, show=False),
+    ]
 
     CSS = """
     Screen {
@@ -228,6 +246,7 @@ class MagiApp(App):
         self._worker = None
         self._reviews: list[MemberReview] = []
         self._sent = ""
+        self._working = ""  # newest line a member's CLI printed
 
     # --- layout ---------------------------------------------------------------
 
@@ -244,7 +263,7 @@ class MagiApp(App):
                 yield from self._member_panel("casper")
                 yield Static(_MAGI_BIG, id="magi")
                 yield from self._member_panel("melchior")
-            yield RichLog(id="log", wrap=True, markup=True)
+            yield Ticker(id="log", wrap=True, markup=True)
             with Horizontal(id="qbar"):
                 yield Static("question:", id="qlabel")
                 yield Input(
@@ -273,7 +292,7 @@ class MagiApp(App):
     # --- rendering ------------------------------------------------------------
 
     def _log(self, line: str) -> None:
-        self.query_one("#log", RichLog).write(line)
+        self.query_one("#log", Ticker).write(line)
 
     def _meta_text(self) -> str:
         if self._deliberating:
@@ -339,7 +358,7 @@ class MagiApp(App):
             elapsed = time.monotonic() - self._t0
             waiting = ", ".join(sorted(self._pending)) or "—"
             clock = f"T+{elapsed:.0f}s"  # pad the whole token, not the number
-            bar.update(f"{clock:<9}deliberating: {waiting}")
+            bar.update(f"{clock:<9}deliberating: {waiting}{self._working}")
         elif self.result is None:
             bar.update("STANDBY — enter the question below to convene")
 
@@ -364,6 +383,7 @@ class MagiApp(App):
         self._phase = "review"
         self._t0 = time.monotonic()
         self._pending = set(self.council)
+        self._working = ""
         bar = self.query_one("#statusbar", Static)
         bar.remove_class("approve", "reject")
         self.query_one("#taskinput", Input).disabled = True  # no edits mid-session
@@ -376,8 +396,20 @@ class MagiApp(App):
         self._log(
             f"Q: {self.task_text or '[dim]no task text — repo changes reviewed as-is[/]'}"
         )
-        self.query_one("#log", RichLog).write(Rule(style="#5a4a20"))
+        self.query_one("#log", Ticker).write(Rule(style="#5a4a20"))
         self._worker = self.run_worker(self._deliberate(packet), exclusive=True)
+
+    def action_yank(self) -> None:
+        """vim's y: copy the mouse selection.
+
+        With nothing selected the key is not ours — SkipAction hands it back,
+        so `y` still types a `y` in the question field.
+        """
+        text = self.screen.get_selected_text()
+        if not text:
+            raise SkipAction()
+        self.copy_to_clipboard(text)
+        self._log(f"[dim]yanked {len(text)} characters[/]")
 
     def action_stop_council(self) -> None:
         """ctrl+c — abandon the session at any stage and return to standby."""
@@ -421,6 +453,9 @@ class MagiApp(App):
             self._start_rebuttal(payload)
         elif kind == "rebuttal":
             self._show_rebuttal(payload)
+        elif kind == "progress":
+            role, line = payload
+            self._working = f"  ·  {role} {line[:70]}"  # status bar, not the ticker
 
     def _show_review(self, r: MemberReview) -> None:
         self._pending.discard(r.role)
@@ -445,7 +480,7 @@ class MagiApp(App):
     def _start_rebuttal(self, roles: list[str]) -> None:
         self._phase = "rebuttal"
         self._pending = set(roles)
-        self.query_one("#log", RichLog).write(
+        self.query_one("#log", Ticker).write(
             Rule("反 論 / REBUTTAL — findings cross-examined", style="#5a4a20")
         )
         for role in roles:

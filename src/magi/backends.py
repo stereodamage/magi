@@ -42,7 +42,45 @@ async def _reap(proc) -> None:
     await proc.wait()
 
 
-async def _run(cmd: list[str], stdin: str, timeout: float, cwd: Path | None) -> str:
+async def _feed(proc, stdin: str) -> None:
+    try:
+        proc.stdin.write(stdin.encode())
+        await proc.stdin.drain()
+    except (BrokenPipeError, ConnectionResetError):
+        pass  # the CLI stopped reading; its exit code carries the reason
+    finally:
+        proc.stdin.close()
+
+
+async def _pump(stream, on_line=None) -> bytes:
+    """Drain a pipe to EOF, handing each line to on_line as it lands.
+
+    Line by line, not communicate(): a line that arrives while the CLI is
+    still working is the only honest sign that it is still working.
+    """
+    chunks = []
+    while True:
+        try:
+            line = await stream.readline()
+        except ValueError:
+            # a line longer than the 64K stream buffer. Keep the bytes and
+            # drop the callback for it — progress lines are never this long.
+            line = await stream.read(65536)
+        if not line:
+            return b"".join(chunks)
+        chunks.append(line)
+        if on_line is not None and (text := line.decode(errors="replace").strip()):
+            on_line(text)
+
+
+async def _run(
+    cmd: list[str],
+    stdin: str,
+    timeout: float,
+    cwd: Path | None,
+    on_stderr=None,
+    on_stdout=None,
+) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -54,13 +92,21 @@ async def _run(cmd: list[str], stdin: str, timeout: float, cwd: Path | None) -> 
     except OSError as e:  # missing/unrunnable binary → member OFFLINE, not a crash
         raise BackendError(f"{cmd[0]}: cannot start: {e}") from e
     try:
-        out, err = await asyncio.wait_for(proc.communicate(stdin.encode()), timeout)
+        out, err, _ = await asyncio.wait_for(
+            asyncio.gather(
+                _pump(proc.stdout, on_stdout),
+                _pump(proc.stderr, on_stderr),
+                _feed(proc, stdin),
+            ),
+            timeout,
+        )
     except TimeoutError:
         await _reap(proc)
         raise BackendError(f"{cmd[0]}: timeout after {timeout}s")
     except asyncio.CancelledError:  # operator stopped the council — do not orphan the CLI
         await _reap(proc)
         raise
+    await proc.wait()  # both pipes are at EOF, so this returns at once
     if proc.returncode != 0:
         raise BackendError(
             f"{cmd[0]} exited {proc.returncode}: {err.decode()[-2000:]}",
@@ -117,9 +163,11 @@ class ClaudeCli:
         schema: dict | None = None,
         cwd: Path | None = None,
         timeout: float = 300.0,
+        on_progress=None,
     ) -> Reply:
         t0 = asyncio.get_event_loop().time()
-        out = await _run(self._cmd(system, schema), prompt, timeout, cwd)
+        out = await _run(self._cmd(system, schema), prompt, timeout, cwd,
+                         on_stderr=on_progress)
         envelope = _parse_json(out, self.name)
         if envelope.get("is_error"):
             raise BackendError(f"{self.name}: {envelope.get('result', envelope)}", raw=out)
@@ -137,6 +185,36 @@ class ClaudeCli:
             cost_usd=envelope.get("total_cost_usd"),
             raw=envelope,
         )
+
+
+def _event(line: str) -> str:
+    """One short label for a `codex exec --json` event.
+
+    Documented events: thread.started, turn.started, turn.completed,
+    turn.failed, item.started, item.updated, item.completed. The docs give
+    an item's kind as `item_type` and v0.146.0 writes `type`, so read both;
+    likewise the docs say `assistant_message` where that build says
+    `agent_message`, so no name is matched against a list. turn.completed
+    carries usage: input_tokens, cached_input_tokens, output_tokens.
+
+    Codex documents no way to poll a running exec. This stream is the only
+    live state there is, so a line it cannot parse is still reported.
+    """
+    try:
+        e = json.loads(line)
+    except json.JSONDecodeError:
+        return line[:100]
+    if not isinstance(e, dict):
+        return line[:100]
+    parts = [str(e.get("type", "event"))]
+    item = e.get("item")
+    if isinstance(item, dict):
+        parts.append(str(item.get("item_type") or item.get("type") or ""))
+        parts.append(str(item.get("command") or "")[:40])  # what it is running
+    usage = e.get("usage")
+    if isinstance(usage, dict):
+        parts.append(" ".join(f"{k}={v}" for k, v in usage.items()))
+    return " ".join(p for p in parts if p)[:100]
 
 
 @dataclass
@@ -161,6 +239,7 @@ class CodexCli:
             "--skip-git-repo-check",
             "--color", "never",
             "--ephemeral",
+            "--json",  # JSONL events on stdout; the answer still goes to -o
             "--sandbox", self.sandbox,
             "-o", str(outfile),
         ]
@@ -186,6 +265,7 @@ class CodexCli:
         schema: dict | None = None,
         cwd: Path | None = None,
         timeout: float = 300.0,
+        on_progress=None,
     ) -> Reply:
         t0 = asyncio.get_event_loop().time()
         if system:  # codex has no system-prompt flag; prepend
@@ -196,7 +276,10 @@ class CodexCli:
             if schema:
                 schemafile = Path(tmp) / "schema.json"
                 schemafile.write_text(json.dumps(schema))
-            await _run(self._cmd(outfile, schemafile), prompt, timeout, cwd)
+            await _run(
+                self._cmd(outfile, schemafile), prompt, timeout, cwd,
+                on_stdout=(lambda line: on_progress(_event(line))) if on_progress else None,
+            )
             if not outfile.exists():
                 raise BackendError(f"{self.name}: no output message written")
             text = outfile.read_text().strip()
@@ -228,6 +311,7 @@ class GeminiCli:
         schema: dict | None = None,
         cwd: Path | None = None,
         timeout: float = 300.0,
+        on_progress=None,
     ) -> Reply:
         raise BackendError("gemini: backend not implemented (CLI not installed)")
 

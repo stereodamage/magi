@@ -212,6 +212,12 @@ def _git(repo: Path, *args: str) -> str:
 
 _UNTRACKED_CAP = 100_000  # bytes per untracked file
 _PACKET_CAP = 2_000_000  # bytes of diff per packet, across all sources
+TIMEOUT = 900.0  # seconds a member may take per round
+
+# Prose, not code. A plan or a design note read as a diff produces findings
+# about the document rather than about the change, so it stays out of scope.
+# `magi plan DOC` reviews such a document on purpose, with the right protocol.
+_SCOPE = (".", ":(exclude)docs/")
 
 
 def _truncate(diff: str, cap: int = _PACKET_CAP) -> str:
@@ -229,7 +235,8 @@ def _untracked_diffs(repo: Path, budget: int = _PACKET_CAP) -> str:
     cannot either — thousands of small files still stop at the budget."""
     parts = []
     used = 0
-    for name in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
+    listed = _git(repo, "ls-files", "--others", "--exclude-standard", "--", *_SCOPE)
+    for name in listed.splitlines():
         if used >= budget:
             parts.append(f"# untracked scan stopped: {budget} byte budget reached\n")
             break
@@ -247,16 +254,17 @@ def _untracked_diffs(repo: Path, budget: int = _PACKET_CAP) -> str:
 
 
 def build_packet(repo: Path, task: str | None = None) -> str:
-    diff, err = _git_ok(repo, "diff", "HEAD")
+    diff, err = _git_ok(repo, "diff", "HEAD", "--", *_SCOPE)
     diff += _untracked_diffs(repo, _PACKET_CAP - len(diff))
     scope = "uncommitted changes (working tree vs HEAD, untracked files included)"
     if not diff.strip():
-        diff, err = _git_ok(repo, "show", "HEAD", "--patch")
+        diff, err = _git_ok(repo, "show", "HEAD", "--patch", "--", *_SCOPE)
         scope = "last commit"
     if not diff.strip():
         # an empty packet asks the council to review nothing, and nothing
         # reads as APPROVE — refuse it instead of passing the gate
-        raise ValueError(f"nothing to review in {repo}: {err or 'no changes, no commits'}")
+        raise ValueError(f"nothing to review in {repo}: {err or 'no changes outside docs/'}")
+    scope += "; docs/ is out of scope — do not report on documents"
     diff = _truncate(diff)
     task_text = task or (
         "(no task description provided — infer intent conservatively and "
@@ -292,13 +300,15 @@ async def review_member(
     backend,
     packet: str,
     repo: Path,
-    timeout: float = 600.0,
+    timeout: float = TIMEOUT,
     mode: str = "code",
+    on_progress=None,
 ) -> MemberReview:
     system = system_prompt(role, "review", mode)
     try:
         r = await backend.ask(
-            packet, system=system, schema=REVIEW_SCHEMA, cwd=repo, timeout=timeout
+            packet, system=system, schema=REVIEW_SCHEMA, cwd=repo, timeout=timeout,
+            on_progress=on_progress,
         )
     # every failure is this member's failure, not the council's: a vendor CLI
     # that returns a list where a dict belongs, or bytes that do not decode,
@@ -320,7 +330,7 @@ async def deliberate(
     council: dict[str, object],
     packet: str,
     repo: Path,
-    timeout: float = 600.0,
+    timeout: float = TIMEOUT,
     mode: str = "code",
 ) -> list[MemberReview]:
     return list(await asyncio.gather(
@@ -362,8 +372,9 @@ async def rebut_member(
     packet: str,
     reviews: list[MemberReview],
     repo: Path,
-    timeout: float = 600.0,
+    timeout: float = TIMEOUT,
     mode: str = "code",
+    on_progress=None,
 ) -> MemberRebuttal:
     own = next(r for r in reviews if r.role == role)
     others = [
@@ -379,6 +390,7 @@ async def rebut_member(
             schema=REBUTTAL_SCHEMA,
             cwd=repo,
             timeout=timeout,
+            on_progress=on_progress,
         )
     except Exception as e:  # as in review_member: one seat fails, not the council
         return MemberRebuttal(
@@ -403,7 +415,7 @@ async def rebut(
     packet: str,
     reviews: list[MemberReview],
     repo: Path,
-    timeout: float = 600.0,
+    timeout: float = TIMEOUT,
     mode: str = "code",
 ) -> list[MemberRebuttal]:
     roles = rebuttal_roles(council, reviews)
@@ -503,6 +515,15 @@ EXIT_CODES = {"APPROVE": 0, "REQUEST_CHANGES": 1, "HUMAN_REVIEW": 2}
 EXIT_ERROR = 3
 
 
+def _progress(emit, role: str):
+    """A sink for one member's CLI output.
+
+    The panels pulse whether or not the CLI is doing anything. A line that
+    arrives from the CLI is the only live proof that it still is.
+    """
+    return lambda line: emit("progress", (role, line))
+
+
 async def _stream(coros: list, emit, kind: str) -> list:
     """Run the coroutines together and emit each result as it lands.
 
@@ -528,7 +549,7 @@ async def convene(
     council: dict[str, object],
     repo: Path,
     task: str | None = None,
-    timeout: float = 600.0,
+    timeout: float = TIMEOUT,
     on_event=None,
     packet: str | None = None,
     mode: str = "code",
@@ -546,7 +567,8 @@ async def convene(
     packet = packet or build_packet(repo, task)
     emit("packet", packet)
     reviews = await _stream(
-        [review_member(role, b, packet, repo, timeout, mode) for role, b in council.items()],
+        [review_member(role, b, packet, repo, timeout, mode, _progress(emit, role))
+         for role, b in council.items()],
         emit,
         "review",
     )
@@ -555,7 +577,8 @@ async def convene(
     if roles:
         emit("rebuttal_start", roles)
         rebuttals = await _stream(
-            [rebut_member(role, council[role], packet, reviews, repo, timeout, mode)
+            [rebut_member(role, council[role], packet, reviews, repo, timeout, mode,
+                          _progress(emit, role))
              for role in roles],
             emit,
             "rebuttal",
@@ -670,7 +693,7 @@ def run_headless(
     repo: Path,
     task: str | None = None,
     as_json: bool = False,
-    timeout: float = 600.0,
+    timeout: float = TIMEOUT,
     packet: str | None = None,
     mode: str = "code",
 ) -> int:
@@ -690,10 +713,18 @@ def run_headless(
     t0 = time.monotonic()
 
     sent = ""  # the packet as built, kept for the saved record
+    said = {}  # role → when its last progress line was printed
 
     def emit(kind: str, payload) -> None:
         nonlocal sent
-        if kind == "packet":
+        if kind == "progress":
+            role, line = payload
+            now = time.monotonic()
+            if now - said.get(role, 0.0) < 30.0:
+                return  # a status, not a transcript
+            said[role] = now
+            msg = f"{role.upper()} working: {line[:100]}"
+        elif kind == "packet":
             sent = payload
             msg = f"packet built ({len(payload)} chars); review round: {len(council)} members"
         elif kind == "review":

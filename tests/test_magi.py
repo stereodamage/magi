@@ -596,3 +596,33 @@ def test_saved_run_keeps_the_packet_and_the_raw_replies(repo, capsys):
     # the reply that failed the schema is the one worth studying, so keep it whole
     assert by_role["melchior"]["raw_text"] == "I think it is fine, actually"
     assert len(list((repo / ".magi" / "runs").glob("*.json"))) == 1
+
+
+def test_codex_event_labels_both_documented_and_shipped_spellings():
+    """Codex documents an item's kind as `item_type` and v0.146.0 writes
+    `type`; the docs say `assistant_message` where that build says
+    `agent_message`. Read both, match against neither."""
+    from magi.backends import _event
+
+    assert _event('{"type":"thread.started","thread_id":"a"}') == "thread.started"
+    # as the installed CLI writes it
+    assert _event('{"type":"item.completed","item":{"type":"agent_message"}}') == (
+        "item.completed agent_message"
+    )
+    # as the docs spell it, with the command the member is running
+    assert _event(
+        '{"type":"item.started","item":{"item_type":"command_execution","command":"rg foo"}}'
+    ) == "item.started command_execution rg foo"
+    assert _event('{"type":"turn.completed","usage":{"input_tokens":9}}') == (
+        "turn.completed input_tokens=9"
+    )
+    # the stream is the only live state codex offers, so junk is still reported
+    assert _event("not json") == "not json"
+    assert _event("[1,2,3]") == "[1,2,3]"
+
+
+def test_codex_asks_for_the_event_stream():
+    """--json puts events on stdout; the answer still arrives via -o outfile."""
+    cmd = CodexCli()._cmd(Path("/tmp/out.txt"), None)
+    assert "--json" in cmd
+    assert cmd[cmd.index("-o") + 1] == "/tmp/out.txt"

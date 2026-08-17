@@ -14,7 +14,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .backends import BackendError, ClaudeCli, CodexCli, GeminiCli
+from .backends import ClaudeCli, CodexCli, GeminiCli
 from .personas import system_prompt
 
 _FINDING_SCHEMA = {
@@ -96,10 +96,26 @@ class MemberReview:
     error: str | None = None
     duration_s: float = 0.0
     cost_usd: float | None = None
+    # the reply as the member wrote it, before any parsing, and the vendor
+    # envelope around it (usage, cost, session id) when the CLI returns one.
+    # save_run keeps both: `review` is what the protocol used, `raw_text` is
+    # what the model actually said, and the two differ in the interesting cases.
+    raw_text: str = ""
+    raw_envelope: dict | None = None
 
     @property
     def findings(self) -> list[dict]:
-        return (self.review or {}).get("findings", [])
+        """Findings, renumbered `<role letter><n>` — M1, B2, C3.
+
+        Members number their own findings and two of them can pick the same
+        id for different bugs. The merge keys on the id, so a collision drops
+        a finding, and a dropped blocking finding loses its veto. Renumbering
+        makes the id unique by construction. Every reader — merge, rebuttal
+        prompt, both renderers — goes through this property, so the id a
+        member sees is the id the merge uses.
+        """
+        raw = (self.review or {}).get("findings", [])
+        return [{**f, "id": f"{self.role[0].upper()}{i}"} for i, f in enumerate(raw, 1)]
 
 
 @dataclass
@@ -111,6 +127,8 @@ class MemberRebuttal:
     error: str | None = None
     duration_s: float = 0.0
     cost_usd: float | None = None
+    raw_text: str = ""  # as in MemberReview: the reply before parsing
+    raw_envelope: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -176,23 +194,44 @@ def repo_branch(repo: Path) -> str:
     return _git(repo, "rev-parse", "--short", "HEAD").strip() or "-"  # detached
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git_ok(repo: Path, *args: str) -> tuple[str, str]:
+    """(stdout, error). error is git's stderr when the command failed."""
     r = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True
     )
-    return r.stdout
+    if r.returncode == 0:
+        return r.stdout, ""
+    return r.stdout, r.stderr.strip() or f"git {args[0]} exited {r.returncode}"
+
+
+def _git(repo: Path, *args: str) -> str:
+    """stdout only — for commands whose failure carries no information, and
+    for `diff --no-index`, which exits 1 whenever the two files differ."""
+    return _git_ok(repo, *args)[0]
 
 
 _UNTRACKED_CAP = 100_000  # bytes per untracked file
+_PACKET_CAP = 2_000_000  # bytes of diff per packet, across all sources
 
 
-def _untracked_diffs(repo: Path) -> str:
+def _truncate(diff: str, cap: int = _PACKET_CAP) -> str:
+    if len(diff) <= cap:
+        return diff
+    return f"{diff[:cap]}\n... truncated at {cap} bytes — the scope below is incomplete\n"
+
+
+def _untracked_diffs(repo: Path, budget: int = _PACKET_CAP) -> str:
     """New-file diffs for untracked files, read-only via git diff --no-index.
 
-    Respects .gitignore; oversized files are noted and skipped so one stray
-    data dump cannot flood the evidence packet."""
+    Respects .gitignore. Two limits: one stray data dump cannot flood the
+    packet (per-file cap), and a repo that fails to ignore its build output
+    cannot either — thousands of small files still stop at the budget."""
     parts = []
+    used = 0
     for name in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines():
+        if used >= budget:
+            parts.append(f"# untracked scan stopped: {budget} byte budget reached\n")
+            break
         try:
             size = (repo / name).stat().st_size
         except OSError:
@@ -200,16 +239,24 @@ def _untracked_diffs(repo: Path) -> str:
         if size > _UNTRACKED_CAP:
             parts.append(f"# untracked file skipped ({size} bytes > {_UNTRACKED_CAP}): {name}\n")
             continue
-        parts.append(_git(repo, "diff", "--no-index", "--", "/dev/null", name))
+        one = _git(repo, "diff", "--no-index", "--", "/dev/null", name)
+        used += len(one)
+        parts.append(one)
     return "".join(parts)
 
 
 def build_packet(repo: Path, task: str | None = None) -> str:
-    diff = _git(repo, "diff", "HEAD") + _untracked_diffs(repo)
+    diff, err = _git_ok(repo, "diff", "HEAD")
+    diff += _untracked_diffs(repo, _PACKET_CAP - len(diff))
     scope = "uncommitted changes (working tree vs HEAD, untracked files included)"
     if not diff.strip():
-        diff = _git(repo, "show", "HEAD", "--patch")
+        diff, err = _git_ok(repo, "show", "HEAD", "--patch")
         scope = "last commit"
+    if not diff.strip():
+        # an empty packet asks the council to review nothing, and nothing
+        # reads as APPROVE — refuse it instead of passing the gate
+        raise ValueError(f"nothing to review in {repo}: {err or 'no changes, no commits'}")
+    diff = _truncate(diff)
     task_text = task or (
         "(no task description provided — infer intent conservatively and "
         "raise missing context through `questions`)"
@@ -232,7 +279,7 @@ def build_plan_packet(doc: Path, context: str | None = None) -> str:
     return (
         "=== PROPOSAL PACKET ===\n\n"
         f"CONTEXT / GOALS / CONSTRAINTS:\n{context_text}\n\n"
-        f"PROPOSAL DOCUMENT — {doc.name}:\n{doc.read_text()}\n\n"
+        f"PROPOSAL DOCUMENT — {doc.name}:\n{_truncate(doc.read_text())}\n\n"
         "The proposal's directory is available read-only in your working "
         "directory; inspect existing code there when the proposal refers "
         "to it."
@@ -252,11 +299,20 @@ async def review_member(
         r = await backend.ask(
             packet, system=system, schema=REVIEW_SCHEMA, cwd=repo, timeout=timeout
         )
-    except BackendError as e:
-        return MemberReview(role=role, backend=backend.name, verdict="OFFLINE", error=str(e))
+    # every failure is this member's failure, not the council's: a vendor CLI
+    # that returns a list where a dict belongs, or bytes that do not decode,
+    # must take one seat OFFLINE and leave the other two reviewing
+    except Exception as e:  # CancelledError is a BaseException — it still propagates
+        return MemberReview(
+            role=role, backend=backend.name, verdict="OFFLINE", error=str(e),
+            raw_text=getattr(e, "raw", ""),  # a reply that failed to parse is still evidence
+        )
     review = r.data if isinstance(r.data, dict) else None
     verdict = (review or {}).get("verdict", "ABSTAIN")
-    return MemberReview(role, backend.name, verdict, review, None, r.duration_s, r.cost_usd)
+    return MemberReview(
+        role, backend.name, verdict, review, None, r.duration_s, r.cost_usd,
+        raw_text=r.text, raw_envelope=r.raw,
+    )
 
 
 async def deliberate(
@@ -291,7 +347,9 @@ def _rebuttal_prompt(packet: str, own: MemberReview, others: list[dict]) -> str:
     return (
         f"{packet}\n\n"
         "=== YOUR ORIGINAL REVIEW (reference only) ===\n"
-        f"{json.dumps(own.review or {}, indent=2)}\n\n"
+        # own.findings, not own.review["findings"]: both blocks must show the
+        # renumbered ids, or the member answers with an id no one recognises
+        f"{json.dumps({**(own.review or {}), 'findings': own.findings}, indent=2)}\n\n"
         "=== FINDINGS TO RESPOND TO ===\n"
         f"{json.dumps(others, indent=2)}"
     )
@@ -321,8 +379,10 @@ async def rebut_member(
             cwd=repo,
             timeout=timeout,
         )
-    except BackendError as e:
-        return MemberRebuttal(role=role, backend=backend.name, error=str(e))
+    except Exception as e:  # as in review_member: one seat fails, not the council
+        return MemberRebuttal(
+            role=role, backend=backend.name, error=str(e), raw_text=getattr(e, "raw", ""),
+        )
     data = r.data if isinstance(r.data, dict) else {}
     return MemberRebuttal(
         role,
@@ -332,6 +392,8 @@ async def rebut_member(
         None,
         r.duration_s,
         r.cost_usd,
+        raw_text=r.text,
+        raw_envelope=r.raw,
     )
 
 
@@ -440,6 +502,27 @@ EXIT_CODES = {"APPROVE": 0, "REQUEST_CHANGES": 1, "HUMAN_REVIEW": 2}
 EXIT_ERROR = 3
 
 
+async def _stream(coros: list, emit, kind: str) -> list:
+    """Run the coroutines together and emit each result as it lands.
+
+    The finally clause carries the cancellation: when the operator stops the
+    council, the members still in flight are cancelled too, and cancelling
+    them kills their CLI processes. Without it they keep burning tokens with
+    no one left to receive the answer.
+    """
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    done = []
+    try:
+        for fut in asyncio.as_completed(tasks):
+            r = await fut
+            done.append(r)
+            emit(kind, r)
+    finally:
+        for t in tasks:
+            t.cancel()
+    return done
+
+
 async def convene(
     council: dict[str, object],
     repo: Path,
@@ -454,28 +537,28 @@ async def convene(
     on_event(kind, payload) streams progress as it happens:
     ("packet", str) → ("review", MemberReview)… → ("rebuttal_start", [roles])
     → ("rebuttal", MemberRebuttal)… → ("merged", dict).
+
+    This is the one implementation of the protocol. Both front ends drive it:
+    the TUI through on_event, run_headless through its stderr emit.
     """
     emit = on_event or (lambda kind, payload: None)
     packet = packet or build_packet(repo, task)
     emit("packet", packet)
-    reviews: list[MemberReview] = []
-    for fut in asyncio.as_completed(
-        [review_member(role, b, packet, repo, timeout, mode) for role, b in council.items()]
-    ):
-        r = await fut
-        reviews.append(r)
-        emit("review", r)
+    reviews = await _stream(
+        [review_member(role, b, packet, repo, timeout, mode) for role, b in council.items()],
+        emit,
+        "review",
+    )
     roles = rebuttal_roles(council, reviews)
     rebuttals: list[MemberRebuttal] = []
     if roles:
         emit("rebuttal_start", roles)
-        for fut in asyncio.as_completed(
+        rebuttals = await _stream(
             [rebut_member(role, council[role], packet, reviews, repo, timeout, mode)
-             for role in roles]
-        ):
-            rb = await fut
-            rebuttals.append(rb)
-            emit("rebuttal", rb)
+             for role in roles],
+            emit,
+            "rebuttal",
+        )
     merged = merge(reviews, rebuttals, mode)
     emit("merged", merged)
     return reviews, rebuttals, merged
@@ -526,17 +609,59 @@ def render_json(
     reviews: list[MemberReview],
     rebuttals: list[MemberRebuttal],
     merged: dict,
+    packet: str | None = None,
 ) -> str:
+    """The full result as JSON. With `packet`, the record is self-contained:
+    the exact prompt the members read next to the replies they wrote."""
     from dataclasses import asdict
 
-    return json.dumps(
-        {
-            **merged,
-            "reviews": [asdict(r) for r in reviews],
-            "rebuttals": [asdict(rb) for rb in rebuttals],
-        },
-        indent=2,
-    )
+    def one(r: MemberReview) -> dict:
+        d = asdict(r)
+        if d["review"] is not None:  # the ids the merge and the ticker used
+            d["review"] = {**d["review"], "findings": r.findings}
+        return d
+
+    out = {
+        **merged,
+        "reviews": [one(r) for r in reviews],
+        "rebuttals": [asdict(rb) for rb in rebuttals],
+    }
+    if packet is not None:
+        out["packet"] = packet
+    return json.dumps(out, indent=2)
+
+
+def save_run(
+    repo: Path,
+    reviews: list[MemberReview],
+    rebuttals: list[MemberRebuttal],
+    merged: dict,
+    packet: str | None = None,
+) -> Path:
+    """Write the whole deliberation to .magi/runs/, and return the path.
+
+    Every run is kept, packet and raw replies included. One overwritten file
+    is not a corpus, and the raw text is the part worth studying: what the
+    member wrote, next to what the protocol made of it.
+
+    The directory ignores itself, so the logs reach neither git nor the
+    evidence packet of the next run.
+    """
+    from datetime import UTC, datetime
+
+    runs = repo / ".magi" / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs.parent / ".gitignore").write_text("*\n")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    path = runs / f"{stamp}-{merged['recommendation']}.json"
+    path.write_text(render_json(reviews, rebuttals, merged, packet))
+    link = runs.parent / "last-run.json"  # stable path, so `cat` needs no timestamp
+    try:
+        link.unlink(missing_ok=True)
+        link.symlink_to(Path("runs") / path.name)
+    except OSError:
+        pass  # ponytail: the timestamped file is the record, the alias is a convenience
+    return path
 
 
 def run_headless(
@@ -563,8 +688,12 @@ def run_headless(
     print(f"MAGI council convened: {names}", file=sys.stderr)
     t0 = time.monotonic()
 
+    sent = ""  # the packet as built, kept for the saved record
+
     def emit(kind: str, payload) -> None:
+        nonlocal sent
         if kind == "packet":
+            sent = payload
             msg = f"packet built ({len(payload)} chars); review round: {len(council)} members"
         elif kind == "review":
             note = f" — {payload.error}" if payload.error else ""
@@ -582,9 +711,19 @@ def run_headless(
             return
         print(f"[T+{time.monotonic() - t0:4.0f}s] {msg}", file=sys.stderr, flush=True)
 
-    reviews, rebuttals, merged = asyncio.run(
-        convene(council, repo, task, timeout, on_event=emit, packet=packet, mode=mode)
-    )
+    try:
+        reviews, rebuttals, merged = asyncio.run(
+            convene(council, repo, task, timeout, on_event=emit, packet=packet, mode=mode)
+        )
+    except Exception as e:
+        # exit 1 means REQUEST_CHANGES to the caller. A crash must never say
+        # that: it did not review anything, so it reports EXIT_ERROR.
+        print(f"magi: council failed: {e}", file=sys.stderr)
+        return EXIT_ERROR
+    try:
+        print(f"full run: {save_run(repo, reviews, rebuttals, merged, sent)}", file=sys.stderr)
+    except OSError as e:  # a read-only checkout must not lose the verdict
+        print(f"magi: could not save the run: {e}", file=sys.stderr)
     render = render_json if as_json else render_text
     print(render(reviews, rebuttals, merged))
     return EXIT_CODES.get(merged["recommendation"], EXIT_CODES["HUMAN_REVIEW"])

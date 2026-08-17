@@ -7,6 +7,7 @@ else ~/.config/magi/config.toml.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tomllib
@@ -100,7 +101,10 @@ def render_config(council: dict[str, dict]) -> str:
     for role in ROLES:
         lines.append(f"[council.{role}]")
         for key, value in council[role].items():
-            lines.append(f'{key} = "{value}"')
+            # json.dumps, not an f-string quote: it renders bool, int and str
+            # as valid TOML scalars, and escapes a quote inside a value.
+            # `pristine = "False"` would be a truthy string, silently on.
+            lines.append(f"{key} = {json.dumps(value)}")
         lines.append("")
     return "\n".join(lines)
 

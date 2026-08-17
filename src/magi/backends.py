@@ -14,7 +14,15 @@ from pathlib import Path
 
 
 class BackendError(RuntimeError):
-    pass
+    """A vendor CLI failed. `raw` carries whatever text it did produce.
+
+    A reply that fails schema parsing is the most interesting one to study,
+    so the council saves it instead of keeping only the truncated message.
+    """
+
+    def __init__(self, message: str, raw: str = "") -> None:
+        super().__init__(message)
+        self.raw = raw
 
 
 @dataclass
@@ -25,6 +33,13 @@ class Reply:
     duration_s: float
     cost_usd: float | None = None
     raw: dict | None = None  # full vendor envelope, when available
+
+
+async def _reap(proc) -> None:
+    """Kill the CLI and wait for it. The wait is the point: kill() only sends
+    the signal, and an unwaited child stays a zombie until magi itself exits."""
+    proc.kill()
+    await proc.wait()
 
 
 async def _run(cmd: list[str], stdin: str, timeout: float, cwd: Path | None) -> str:
@@ -41,13 +56,16 @@ async def _run(cmd: list[str], stdin: str, timeout: float, cwd: Path | None) -> 
     try:
         out, err = await asyncio.wait_for(proc.communicate(stdin.encode()), timeout)
     except TimeoutError:
-        proc.kill()
+        await _reap(proc)
         raise BackendError(f"{cmd[0]}: timeout after {timeout}s")
     except asyncio.CancelledError:  # operator stopped the council — do not orphan the CLI
-        proc.kill()
+        await _reap(proc)
         raise
     if proc.returncode != 0:
-        raise BackendError(f"{cmd[0]} exited {proc.returncode}: {err.decode()[-2000:]}")
+        raise BackendError(
+            f"{cmd[0]} exited {proc.returncode}: {err.decode()[-2000:]}",
+            raw=out.decode(),
+        )
     return out.decode()
 
 
@@ -55,7 +73,7 @@ def _parse_json(text: str, backend: str) -> dict | list:
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        raise BackendError(f"{backend}: expected JSON, got: {text[:500]!r}") from e
+        raise BackendError(f"{backend}: expected JSON, got: {text[:500]!r}", raw=text) from e
 
 
 @dataclass
@@ -104,7 +122,7 @@ class ClaudeCli:
         out = await _run(self._cmd(system, schema), prompt, timeout, cwd)
         envelope = _parse_json(out, self.name)
         if envelope.get("is_error"):
-            raise BackendError(f"{self.name}: {envelope.get('result', envelope)}")
+            raise BackendError(f"{self.name}: {envelope.get('result', envelope)}", raw=out)
         text = envelope.get("result", "")
         data = None
         if schema:

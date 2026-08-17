@@ -12,7 +12,6 @@ Panels pulse amber while a member deliberates, then flip to the verdict:
 
 from __future__ import annotations
 
-import asyncio
 import time
 from pathlib import Path
 
@@ -27,14 +26,12 @@ from .council import (
     MemberRebuttal,
     MemberReview,
     build_packet,
+    convene,
     default_council,
     finding_authors,
     is_git_repo,
-    merge,
-    rebut_member,
-    rebuttal_roles,
     repo_branch,
-    review_member,
+    save_run,
 )
 
 # the reference screen: plain bold caps, tight, with a katakana middle dot
@@ -229,7 +226,8 @@ class MagiApp(App):
         self._phase = "review"
         self._pending: set[str] = set()
         self._worker = None
-        self._inflight: list[asyncio.Task] = []
+        self._reviews: list[MemberReview] = []
+        self._sent = ""
 
     # --- layout ---------------------------------------------------------------
 
@@ -313,9 +311,12 @@ class MagiApp(App):
             f"[bold]{TITLES[role]}[/]\n\n{label}\n{wave}{wave[::-1]}"
         )
 
-    def _paint_verdict(self, r: MemberReview) -> None:
+    def _paint_verdict(self, r: MemberReview, verdict: str | None = None) -> None:
+        # verdict overrides r.verdict after a rebuttal. The review keeps the
+        # vote it cast; merge() carries the updated one into the resolution.
+        verdict = verdict or r.verdict
         # unknown verdict falls back to the raw word, so nothing renders as "？"
-        label, css = VERDICTS.get(r.verdict, (r.verdict, "abstain"))
+        label, css = VERDICTS.get(verdict, (verdict, "abstain"))
         panel = self.query_one(f"#{r.role}", Vertical)
         panel.remove_class("approve", "reject", "abstain", "offline")
         panel.add_class(css)
@@ -350,6 +351,14 @@ class MagiApp(App):
         if self.packet is None and not is_git_repo(self.repo):
             self._log(f"[bold red]not a git repository:[/] {self.repo}")
             return
+        try:  # built here, not in the worker: nothing flips to DELIBERATING
+            packet = self.packet or build_packet(self.repo, self.task_text)
+        except ValueError as e:
+            self._log(f"[bold red]{e}[/]")
+            return
+        self._diff_lines = str(
+            sum(1 for line in packet.splitlines() if line.startswith(("+", "-")))
+        )
         self.result = None
         self._deliberating = True
         self._phase = "review"
@@ -368,16 +377,15 @@ class MagiApp(App):
             f"Q: {self.task_text or '[dim]no task text — repo changes reviewed as-is[/]'}"
         )
         self.query_one("#log", RichLog).write(Rule(style="#5a4a20"))
-        self._worker = self.run_worker(self._deliberate(), exclusive=True)
+        self._worker = self.run_worker(self._deliberate(packet), exclusive=True)
 
     def action_stop_council(self) -> None:
         """ctrl+c — abandon the session at any stage and return to standby."""
         if not self._deliberating:
             return self.action_help_quit()  # idle: keep the "press ctrl+q" hint
-        for task in self._inflight:  # cancelling kills the member CLI processes
-            task.cancel()
-        self._inflight = []
         if self._worker is not None:
+            # convene() cancels the members still in flight on its way out,
+            # and cancelling a member kills its CLI process
             self._worker.cancel()
         self._log("[bold red]中 止 / ABORTED[/] — council stopped by the operator")
         self._deliberating = False
@@ -393,46 +401,48 @@ class MagiApp(App):
         inp.disabled = False
         inp.focus()
 
-    async def _deliberate(self) -> None:
-        packet = self.packet or build_packet(self.repo, self.task_text)
-        self._diff_lines = str(
-            sum(1 for line in packet.splitlines() if line.startswith(("+", "-")))
-        )
+    async def _deliberate(self, packet: str) -> None:
+        self._reviews = []
+        self._sent = packet  # saved with the run: the prompt beside the replies
         self._refresh_meta()
-        # kept on self so ctrl+c can cancel the stragglers, not just the worker
-        self._inflight = [
-            asyncio.ensure_future(review_member(role, b, packet, self.repo, mode=self.mode))
-            for role, b in self.council.items()
-        ]
-        reviews: list[MemberReview] = []
-        for fut in asyncio.as_completed(self._inflight):
-            r = await fut
-            reviews.append(r)
-            self._pending.discard(r.role)
-            self._paint_verdict(r)
-            n = len(r.findings)
-            self._log(
-                f"[dim][{r.role.upper()}][/] {_vote(r.verdict)}"
-                f" [dim]· {n} finding{'s' if n != 1 else ''}"
-                f" · {r.duration_s:.0f}s[/]"
-            )
-            if r.error:
-                self._log(f"[dim][{r.role.upper()}] offline: {r.error[:120]}[/]")
-            for raw in r.findings:
-                f = Finding.of(raw)
-                sev = _SEV_MARKUP.get(f.severity, f.severity)
-                loc = f" [dim]{f.location}[/]" if f.location else ""
-                self._log(
-                    f"[bold]{f.id}:[/] {f.title}  {sev}"
-                    f" [dim](conf {f.confidence:.2f})[/]{loc}"
-                )
-        rebuttals = await self._rebut(packet, reviews)
-        self._finish(merge(reviews, rebuttals, self.mode), reviews, rebuttals)
+        reviews, rebuttals, merged = await convene(
+            self.council, self.repo, packet=packet, mode=self.mode,
+            on_event=self._on_event,
+        )
+        self._finish(merged, reviews, rebuttals)
 
-    async def _rebut(self, packet: str, reviews: list[MemberReview]) -> list[MemberRebuttal]:
-        roles = rebuttal_roles(self.council, reviews)
-        if not roles:
-            return []
+    def _on_event(self, kind: str, payload) -> None:
+        """Paint one protocol event. convene() runs the protocol; the TUI only
+        draws it, so both front ends share a single implementation."""
+        if kind == "review":
+            self._reviews.append(payload)
+            self._show_review(payload)
+        elif kind == "rebuttal_start":
+            self._start_rebuttal(payload)
+        elif kind == "rebuttal":
+            self._show_rebuttal(payload)
+
+    def _show_review(self, r: MemberReview) -> None:
+        self._pending.discard(r.role)
+        self._paint_verdict(r)
+        n = len(r.findings)
+        self._log(
+            f"[dim][{r.role.upper()}][/] {_vote(r.verdict)}"
+            f" [dim]· {n} finding{'s' if n != 1 else ''}"
+            f" · {r.duration_s:.0f}s[/]"
+        )
+        if r.error:
+            self._log(f"[dim][{r.role.upper()}] offline: {r.error[:120]}[/]")
+        for raw in r.findings:
+            f = Finding.of(raw)
+            sev = _SEV_MARKUP.get(f.severity, f.severity)
+            loc = f" [dim]{f.location}[/]" if f.location else ""
+            self._log(
+                f"[bold]{f.id}:[/] {f.title}  {sev}"
+                f" [dim](conf {f.confidence:.2f})[/]{loc}"
+            )
+
+    def _start_rebuttal(self, roles: list[str]) -> None:
         self._phase = "rebuttal"
         self._pending = set(roles)
         self.query_one("#log", RichLog).write(
@@ -441,42 +451,31 @@ class MagiApp(App):
         for role in roles:
             panel = self.query_one(f"#{role}", Vertical)
             panel.remove_class("approve", "reject", "abstain", "offline")
-        by_role = {r.role: r for r in reviews}
-        author = finding_authors(reviews)  # a position targets someone else's finding
-        rebuttals: list[MemberRebuttal] = []
-        self._inflight = [
-            asyncio.ensure_future(
-                rebut_member(role, self.council[role], packet, reviews, self.repo, mode=self.mode)
-            )
-            for role in roles
-        ]
-        for fut in asyncio.as_completed(self._inflight):
-            rb = await fut
-            rebuttals.append(rb)
-            self._pending.discard(rb.role)
-            review = by_role[rb.role]
-            if rb.error:
-                self._log(f"[dim][{rb.role.upper()}] rebuttal failed: {rb.error[:120]}[/]")
-            else:
-                for resp in rb.responses:
-                    pos = _POSITION_MARKUP.get(resp["position"], resp["position"])
-                    reason = resp.get("reason", "")  # RichLog wraps it; do not cut
-                    fid = resp["finding_id"]
-                    filed_by = author.get(fid)
-                    who = rb.role.upper()
-                    if filed_by and filed_by != rb.role:
-                        who = f"{who} → {filed_by.upper()}"
-                    self._log(
-                        f"[dim][{who}][/] {pos} [bold]{fid}[/] [dim]{reason}[/]"
-                    )
-                if rb.updated_verdict not in ("", "UNCHANGED") and rb.updated_verdict != review.verdict:
-                    self._log(
-                        f"[dim][{rb.role.upper()}][/] verdict updated:"
-                        f" {_vote(review.verdict)} → {_vote(rb.updated_verdict)}"
-                    )
-                    review.verdict = rb.updated_verdict
-            self._paint_verdict(review)
-        return rebuttals
+
+    def _show_rebuttal(self, rb: MemberRebuttal) -> None:
+        self._pending.discard(rb.role)
+        review = next(r for r in self._reviews if r.role == rb.role)
+        verdict = review.verdict
+        if rb.error:
+            self._log(f"[dim][{rb.role.upper()}] rebuttal failed: {rb.error[:120]}[/]")
+        else:
+            author = finding_authors(self._reviews)  # a position targets someone else's finding
+            for resp in rb.responses:
+                pos = _POSITION_MARKUP.get(resp["position"], resp["position"])
+                reason = resp.get("reason", "")  # RichLog wraps it; do not cut
+                fid = resp["finding_id"]
+                filed_by = author.get(fid)
+                who = rb.role.upper()
+                if filed_by and filed_by != rb.role:
+                    who = f"{who} → {filed_by.upper()}"
+                self._log(f"[dim][{who}][/] {pos} [bold]{fid}[/] [dim]{reason}[/]")
+            if rb.updated_verdict not in ("", "UNCHANGED") and rb.updated_verdict != review.verdict:
+                self._log(
+                    f"[dim][{rb.role.upper()}][/] verdict updated:"
+                    f" {_vote(review.verdict)} → {_vote(rb.updated_verdict)}"
+                )
+                verdict = rb.updated_verdict  # painted only — the review keeps its vote
+        self._paint_verdict(review, verdict)
 
     def _write_run(
         self, merged: dict, reviews: list[MemberReview], rebuttals: list[MemberRebuttal]
@@ -484,17 +483,10 @@ class MagiApp(App):
         """Persist the full deliberation — the ticker only shows a summary."""
         import os
 
-        from .council import render_json
-
-        path = self.repo / ".magi" / "last-run.json"
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # self-ignoring: keeps the log out of git status, and out of the
-            # untracked-file scan that builds the next evidence packet
-            (path.parent / ".gitignore").write_text("*\n")
-            path.write_text(render_json(reviews, rebuttals, merged))
+            path = save_run(self.repo, reviews, rebuttals, merged, self._sent)
         except OSError as e:
-            self._log(f"[dim]could not write {path}: {e}[/]")
+            self._log(f"[dim]could not save the run: {e}[/]")
             return
         self._log(f"[dim]full run: {os.path.relpath(path)}[/]")  # absolute path wraps
 
@@ -506,7 +498,6 @@ class MagiApp(App):
     ) -> None:
         self.result = merged
         self._deliberating = False
-        self._inflight = []
         self._refresh_meta()
         inp = self.query_one("#taskinput", Input)
         inp.disabled = False

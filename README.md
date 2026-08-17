@@ -155,11 +155,20 @@ The question field is locked while the council deliberates. Push ctrl+c to stop
 the council at any stage. MAGI stops the member CLI processes and returns to
 standby. Push ctrl+q to quit.
 
-The ticker shows a summary. The complete deliberation goes to
-`.magi/last-run.json` in the repository that you review — every finding, every
-rebuttal position, and the merge result. This is the same JSON that `--json`
-prints. MAGI writes `.magi/.gitignore` one time, so the directory stays out of
-git and out of the next evidence packet. A stopped council writes no file.
+The ticker shows a summary. Every run — the TUI and the headless modes alike —
+saves the complete deliberation to `.magi/runs/<timestamp>-<verdict>.json` in
+the repository that you review. `.magi/last-run.json` points at the newest one.
+
+The saved run is a research record, so it holds more than `--json` prints:
+
+- the evidence packet, exactly as the members read it;
+- `raw_text` per member — the reply as the model wrote it, before parsing.
+  A reply that fails the schema is kept in full, which is the one you want;
+- `raw_envelope` — the vendor JSON around it: token usage, cost, session id;
+- every finding, every rebuttal position, and the merge result.
+
+MAGI writes `.magi/.gitignore` one time, so the directory stays out of git and
+out of the next evidence packet. A stopped council writes no file.
 
 ### Plan review
 

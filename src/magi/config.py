@@ -134,7 +134,8 @@ def propose(detected: set[str]) -> dict[str, dict]:
     """
     if {"claude", "codex"} <= detected:
         return {
-            "melchior": {"backend": "codex", "model": "gpt-5.6-sol", "effort": "xhigh"},
+            "melchior": {"backend": "codex", "model": "gpt-5.6-sol", "effort": "xhigh",
+                         "context_window": 872000},
             "balthasar": {
                 "backend": "claude",
                 "model": "claude-opus-5",
@@ -166,7 +167,8 @@ def propose(detected: set[str]) -> dict[str, dict]:
         }
     if "codex" in detected:
         return {
-            role: {"backend": "codex", "model": "gpt-5.6-sol", "effort": "xhigh"}
+            role: {"backend": "codex", "model": "gpt-5.6-sol", "effort": "xhigh",
+                   "context_window": 872000}
             for role in ROLES
         }
     raise ValueError(

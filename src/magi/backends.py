@@ -229,6 +229,12 @@ class CodexCli:
     model: str | None = None  # None = user's configured default
     effort: str | None = None  # minimal | low | medium | high | xhigh
     service_tier: str | None = None  # "priority" = the "Fast" tier (1.5x speed, more usage)
+    # None leaves codex on the model's default. `codex debug models` reports
+    # both numbers per model: gpt-5.6-sol defaults to 272000 and allows up to
+    # 872000, so the default throws away two thirds of the window a large diff
+    # needs. Raising it past max_context_window is a 400 from the API, so the
+    # value belongs beside the model that permits it, never hardcoded here.
+    context_window: int | None = None
     sandbox: str = "read-only"  # read-only | workspace-write | danger-full-access
     pristine: bool = True  # skip AGENTS.md project docs
     name: str = "codex"
@@ -249,6 +255,8 @@ class CodexCli:
             cmd += ["-m", self.model]
         if self.effort:
             cmd += ["-c", f"model_reasoning_effort={self.effort}"]
+        if self.context_window:
+            cmd += ["-c", f"model_context_window={self.context_window}"]
         if self.service_tier:
             # A tier the model does not advertise is only a warning, not an error:
             # codex drops it and the run proceeds at the normal tier.

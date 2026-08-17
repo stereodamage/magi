@@ -626,3 +626,16 @@ def test_codex_asks_for_the_event_stream():
     cmd = CodexCli()._cmd(Path("/tmp/out.txt"), None)
     assert "--json" in cmd
     assert cmd[cmd.index("-o") + 1] == "/tmp/out.txt"
+
+
+def test_codex_context_window_is_opt_in(tmp_path):
+    """`codex debug models` reports gpt-5.6-sol defaulting to 272000 with a
+    872000 ceiling. The council asks for the ceiling; a member on another
+    model asks for nothing and keeps that model's own default."""
+    from magi.council import _SOL_WINDOW, default_council
+
+    assert _SOL_WINDOW == 872_000
+    out = tmp_path / "o.txt"
+    assert "model_context_window=872000" in default_council()["melchior"]._cmd(out, None)
+    # unset means unset: never send a ceiling that belongs to a different model
+    assert not [c for c in CodexCli()._cmd(out, None) if "model_context_window" in c]

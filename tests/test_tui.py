@@ -282,3 +282,43 @@ def test_help_verb_matches_dash_help_and_lists_every_command(tmp_path, monkeypat
     with pytest.raises(SystemExit):
         main()
     assert capsys.readouterr().out == text
+
+
+async def test_activity_shows_in_the_cell_and_the_status_line_divides():
+    """A member reports what it is doing in its own cell, not truncated into
+    a bar at the bottom. The status line divides the board from the ticker."""
+    from magi.backends import Reply
+    from textual.widgets import Static
+
+    class Reporting(FakeBackend):
+        def __init__(self, event):
+            super().__init__(review("APPROVE"))
+            self.event = event
+
+        async def ask(self, prompt, **kw):
+            if kw.get("on_progress"):
+                kw["on_progress"](self.event)
+            await asyncio.sleep(0.6)
+            return Reply(self.name, "{}", self.review, 0.6)
+
+    app = MagiApp(
+        council={
+            "melchior": Reporting("item.started command_execution rg foo"),
+            "balthasar": Reporting("item.started reasoning"),
+            "casper": Reporting("turn.failed"),
+        },
+        packet="PACKET", task="go",
+    )
+    async with app.run_test(size=(100, 32)) as pilot:
+        await pilot.pause(0.3)
+        board, bar, log = (app.query_one(s) for s in ("#board", "#statusbar", "#log"))
+        assert board.region.bottom <= bar.region.y < log.region.y
+        cells = {r: str(app.query_one(f"#{r}-body", Static).render()) for r in
+                 ("melchior", "balthasar", "casper")}
+        assert "RUNNING" in cells["melchior"]
+        assert "THINKING" in cells["balthasar"]
+        assert "FAILED" in cells["casper"]
+        # an event nobody maps leaves the phase label in place
+        app._activity.clear()
+        app._paint_running("melchior")
+        assert "DELIBERATING" in str(app.query_one("#melchior-body", Static).render())

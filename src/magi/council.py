@@ -169,6 +169,13 @@ def finding_authors(reviews: list[MemberReview]) -> dict[str, str]:
     return author
 
 
+# gpt-5.6-sol's max_context_window, per `codex debug models`. The model's
+# own default is 272000; a review packet plus the repo it reads around fills
+# that. Tied to the model on the line below, because another model's ceiling
+# is another number and asking for more than the ceiling is a 400.
+_SOL_WINDOW = 872_000
+
+
 def default_council() -> dict[str, object]:
     """Per-member model/effort assignment — adjust freely.
 
@@ -177,7 +184,8 @@ def default_council() -> dict[str, object]:
     them. GeminiCli exists as a stub for a future third family.
     """
     return {
-        "melchior": CodexCli(model="gpt-5.6-sol", effort="xhigh"),
+        "melchior": CodexCli(model="gpt-5.6-sol", effort="xhigh",
+                             context_window=_SOL_WINDOW),
         "balthasar": ClaudeCli(model="claude-opus-5", effort="xhigh"),
         "casper": ClaudeCli(model="claude-fable-5", effort="xhigh"),
     }

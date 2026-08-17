@@ -56,6 +56,22 @@ VERDICTS = {
     "OFFLINE": ("沈 黙 / SILENT", "offline"),
 }
 
+# what a member is doing right now, from its CLI's own event stream. Keys are
+# matched as substrings of the event label, so a vendor that renames one leaves
+# the cell on its phase label rather than showing a wrong verb.
+_ACTIVITY = {
+    "command_execution": "実 行 / RUNNING",
+    "web_search": "検 索 / SEARCHING",
+    "file_change": "編 集 / EDITING",
+    "mcp_tool_call": "呼 出 / TOOL CALL",
+    "reasoning": "思 考 / THINKING",
+    "assistant_message": "報 告 / REPORTING",
+    "agent_message": "報 告 / REPORTING",
+    "turn.completed": "完 了 / COMPLETE",
+    "turn.failed": "失 敗 / FAILED",
+    "thread.started": "起 動 / STARTING",
+}
+
 _WAVE = "░▒▓█▓▒░ "
 _PHASE_LABEL = {
     "review": "審 議 中 / DELIBERATING",
@@ -246,7 +262,7 @@ class MagiApp(App):
         self._worker = None
         self._reviews: list[MemberReview] = []
         self._sent = ""
-        self._working = ""  # newest line a member's CLI printed
+        self._activity: dict[str, str] = {}  # role → what its CLI is doing
 
     # --- layout ---------------------------------------------------------------
 
@@ -263,6 +279,7 @@ class MagiApp(App):
                 yield from self._member_panel("casper")
                 yield Static(_MAGI_BIG, id="magi")
                 yield from self._member_panel("melchior")
+            yield Static(id="statusbar")
             yield Ticker(id="log", wrap=True, markup=True)
             with Horizontal(id="qbar"):
                 yield Static("question:", id="qlabel")
@@ -270,7 +287,6 @@ class MagiApp(App):
                     id="taskinput",
                     placeholder=f"task / acceptance criteria — repo: {self.repo}",
                 )
-            yield Static(id="statusbar")
 
     def _member_panel(self, role: str) -> ComposeResult:
         with Vertical(id=role, classes="member standby"):
@@ -324,7 +340,10 @@ class MagiApp(App):
 
     def _paint_running(self, role: str) -> None:
         wave = _WAVE[self._frame % len(_WAVE):] + _WAVE[: self._frame % len(_WAVE)]
-        label = _PHASE_LABEL.get(self._phase, _PHASE_LABEL["review"])
+        # the member's own activity when its CLI reports one, else the phase
+        label = self._activity.get(role) or _PHASE_LABEL.get(
+            self._phase, _PHASE_LABEL["review"]
+        )
         # label above the wave: side panels are too narrow to flank it
         self._body(role).update(
             f"[bold]{TITLES[role]}[/]\n\n{label}\n{wave}{wave[::-1]}"
@@ -358,7 +377,7 @@ class MagiApp(App):
             elapsed = time.monotonic() - self._t0
             waiting = ", ".join(sorted(self._pending)) or "—"
             clock = f"T+{elapsed:.0f}s"  # pad the whole token, not the number
-            bar.update(f"{clock:<9}deliberating: {waiting}{self._working}")
+            bar.update(f"{clock:<9}deliberating: {waiting}")
         elif self.result is None:
             bar.update("STANDBY — enter the question below to convene")
 
@@ -383,7 +402,7 @@ class MagiApp(App):
         self._phase = "review"
         self._t0 = time.monotonic()
         self._pending = set(self.council)
-        self._working = ""
+        self._activity.clear()
         bar = self.query_one("#statusbar", Static)
         bar.remove_class("approve", "reject")
         self.query_one("#taskinput", Input).disabled = True  # no edits mid-session
@@ -455,7 +474,10 @@ class MagiApp(App):
             self._show_rebuttal(payload)
         elif kind == "progress":
             role, line = payload
-            self._working = f"  ·  {role} {line[:70]}"  # status bar, not the ticker
+            for key, verb in _ACTIVITY.items():
+                if key in line:
+                    self._activity[role] = verb
+                    break
 
     def _show_review(self, r: MemberReview) -> None:
         self._pending.discard(r.role)

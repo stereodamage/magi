@@ -55,7 +55,71 @@ def load_council(repo: Path) -> dict[str, object]:
     return council
 
 
+class _Plain:
+    """Every color name resolves to an empty string."""
+
+    def __getattr__(self, name: str) -> str:
+        return ""
+
+
+def help_theme():
+    """argparse's own palette, or blanks.
+
+    Python 3.14 colors help output and 3.12 does not, so `magi help` follows
+    argparse instead of deciding on its own. One colored block under a plain
+    help reads worse than no color at all. get_theme() already returns blank
+    strings when the stream is not a tty, or when NO_COLOR is set.
+    """
+    # ponytail: _colorize is private. It is read inside a try that falls back
+    # to plain text, so the worst case is an uncolored help, never a crash.
+    try:
+        from _colorize import get_theme  # 3.13+; the argparse section is 3.14+
+
+        return get_theme().argparse
+    except (ImportError, AttributeError):
+        return _Plain()
+
+
+def describe(repo: Path) -> str:
+    """The council in use and the files it came from, for `magi help`.
+
+    Reads the same two files as load_council, so what it prints is what the
+    next run will convene. A broken config reports its error here instead of
+    at the start of a review.
+    """
+    t = help_theme()
+    sources = (global_config_path(), repo / "magi.toml")
+    try:
+        council = load_council(repo)
+    except ValueError as e:
+        lines = [f"  {t.label}config error: {e}{t.reset}"]
+    else:
+        # each field padded inside its own color, so the columns still line up
+        lines = [
+            f"  {t.action}{role:<10}{t.reset}"
+            f" {t.label}{b.name:<7}{t.reset}"
+            f" {t.summary_long_option}"
+            f"{getattr(b, 'model', None) or '(CLI default)':<16}{t.reset}"
+            f" {getattr(b, 'effort', None) or '-'}"
+            for role in ROLES
+            for b in [council[role]]
+        ]
+    read = [
+        f"    {t.action}✓{t.reset} {p}" if p.is_file() else f"    · {p}"
+        for p in sources
+    ]
+    return "\n".join(
+        [
+            "council in use — built-in defaults < global < repo-local:",
+            *lines,
+            f"\n  read from, in that order (for {repo}):",
+            *read,
+        ]
+    )
+
+
 # --- magi init ----------------------------------------------------------------
+
 
 def detect_clis() -> set[str]:
     return {cli for cli in BACKENDS if shutil.which(cli)}
@@ -71,14 +135,34 @@ def propose(detected: set[str]) -> dict[str, dict]:
     if {"claude", "codex"} <= detected:
         return {
             "melchior": {"backend": "codex", "model": "gpt-5.6-sol", "effort": "xhigh"},
-            "balthasar": {"backend": "claude", "model": "claude-opus-5", "effort": "xhigh"},
-            "casper": {"backend": "claude", "model": "claude-fable-5", "effort": "xhigh"},
+            "balthasar": {
+                "backend": "claude",
+                "model": "claude-opus-5",
+                "effort": "xhigh",
+            },
+            "casper": {
+                "backend": "claude",
+                "model": "claude-fable-5",
+                "effort": "xhigh",
+            },
         }
     if "claude" in detected:  # single-family: personas on different models
         return {
-            "melchior": {"backend": "claude", "model": "claude-fable-5", "effort": "xhigh"},
-            "balthasar": {"backend": "claude", "model": "claude-opus-5", "effort": "xhigh"},
-            "casper": {"backend": "claude", "model": "claude-opus-4-8", "effort": "xhigh"},
+            "melchior": {
+                "backend": "claude",
+                "model": "claude-fable-5",
+                "effort": "xhigh",
+            },
+            "balthasar": {
+                "backend": "claude",
+                "model": "claude-opus-5",
+                "effort": "xhigh",
+            },
+            "casper": {
+                "backend": "claude",
+                "model": "claude-opus-4-8",
+                "effort": "xhigh",
+            },
         }
     if "codex" in detected:
         return {

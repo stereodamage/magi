@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from conftest import FakeBackend, finding, position, rebuttal, review
 
 from magi.tui import MagiApp, TITLES, VERDICTS
@@ -255,3 +257,28 @@ async def test_layout_covers_all_roles():
         assert "STATUS:READY" in meta and "BRANCH:" in meta
     assert set(TITLES) == set(fake_council())
     assert set(VERDICTS) == {"APPROVE", "REQUEST_CHANGES", "ABSTAIN", "OFFLINE"}
+
+
+def test_help_verb_matches_dash_help_and_lists_every_command(tmp_path, monkeypatch, capsys):
+    """`magi help` used to review a directory named `help`."""
+    import sys
+
+    from magi.tui import main
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "none.toml"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["magi", "help"])
+    main()
+    text = capsys.readouterr().out
+    assert "magi plan DOC" in text and "magi init" in text  # both subcommands
+    assert "council in use" in text  # which config is live
+    assert "[repo] [task ...]" in text  # the real usage line, not `magi [-h]`
+    # argparse colours its own sections; the epilog and the council table
+    # must follow it, NO_COLOR included
+    assert "\x1b[" not in text
+
+    monkeypatch.setattr(sys, "argv", ["magi", "--help"])
+    with pytest.raises(SystemExit):
+        main()
+    assert capsys.readouterr().out == text

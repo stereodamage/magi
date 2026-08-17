@@ -577,6 +577,29 @@ def _plan_main(argv: list[str]) -> None:
     ).run()
 
 
+def _epilog(cwd: Path) -> str:
+    from .config import describe, help_theme
+
+    t = help_theme()
+    h, lit, r = t.heading, t.long_option, t.reset
+    council, _, table = describe(cwd).partition("\n")  # colour its heading too
+    return (
+        f"{h}commands:{r}\n"
+        f"  {lit}magi [repo] [task]{r}     review the working tree, or the last commit\n"
+        f"                         when the tree is clean\n"
+        f"  {lit}magi plan DOC [goals]{r}  review a plan or design before you build it\n"
+        f"  {lit}magi init [--local]{r}    detect installed CLIs, write a council config\n"
+        "\n"
+        f"{h}exit codes (headless):{r}\n"
+        f"  {t.action}0{r} APPROVE · {t.action}1{r} REQUEST_CHANGES ·"
+        f" {t.action}2{r} HUMAN_REVIEW · {t.action}3{r} error\n"
+        "\n"
+        f"{h}{council}{r}\n{table}\n"
+        "\n"
+        "Every run is saved to .magi/runs/ with the packet and the raw replies."
+    )
+
+
 def main() -> None:
     import argparse
     import sys
@@ -588,13 +611,24 @@ def main() -> None:
     if sys.argv[1:2] == ["plan"]:
         return _plan_main(sys.argv[2:])
 
-    ap = argparse.ArgumentParser(prog="magi", description="MAGI review council")
+    ap = argparse.ArgumentParser(
+        prog="magi",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "MAGI review council. Three model personas read your change on their\n"
+            "own, then cross-examine each other's findings. A blocking finding\n"
+            "that survives the cross-examination vetoes approval."
+        ),
+        epilog=_epilog(Path.cwd()),
+    )
     ap.add_argument("repo", nargs="?", default=".", help="repository to review")
     ap.add_argument("task", nargs="*", help="task / acceptance criteria")
     ap.add_argument("--report", action="store_true",
                     help="headless: text report on stdout, exit code carries the verdict")
     ap.add_argument("--json", action="store_true",
                     help="headless: JSON result on stdout, exit code carries the verdict")
+    if sys.argv[1:2] == ["help"]:  # before this, `magi help` reviewed ./help
+        return ap.print_help()
     args = ap.parse_args()
     repo = Path(args.repo).resolve()
     task = " ".join(args.task) or None

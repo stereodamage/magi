@@ -127,3 +127,30 @@ def test_render_config_writes_toml_scalars():
     melchior = tomllib.loads(text)["council"]["melchior"]
     assert melchior["pristine"] is False
     assert melchior["backend"] == "claude"
+
+
+def test_describe_names_the_council_and_its_sources(tmp_path, monkeypatch):
+    """`magi help` must say which council the next run will convene."""
+    from magi.config import describe
+
+    absent = tmp_path / "none.toml"
+    monkeypatch.setenv("NO_COLOR", "1")  # 3.14 colours help; assert the plain form
+    monkeypatch.setenv("MAGI_CONFIG", str(absent))
+    (tmp_path / "magi.toml").write_text(
+        '[council.melchior]\nbackend = "claude"\nmodel = "from-repo"\n'
+    )
+    text = describe(tmp_path)
+    assert "melchior   claude  from-repo" in text  # repo-local wins
+    assert "balthasar" in text and "casper" in text  # built-in defaults for the rest
+    assert f"· {absent}" in text  # marked absent
+    assert f"✓ {tmp_path / 'magi.toml'}" in text  # marked read
+
+
+def test_describe_reports_a_broken_config_instead_of_raising(tmp_path, monkeypatch):
+    from magi.config import describe
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("MAGI_CONFIG", str(tmp_path / "none.toml"))
+    (tmp_path / "magi.toml").write_text('[council.melchior]\nbackend = "nonesuch"\n')
+    assert "config error" in describe(tmp_path)
+    assert "unknown backend" in describe(tmp_path)

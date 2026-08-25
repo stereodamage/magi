@@ -271,7 +271,8 @@ def test_help_verb_matches_dash_help_and_lists_every_command(tmp_path, monkeypat
     monkeypatch.setattr(sys, "argv", ["magi", "help"])
     main()
     text = capsys.readouterr().out
-    assert "magi plan DOC" in text and "magi init" in text  # both subcommands
+    assert "magi plan DOC" in text and "magi init" in text  # subcommands
+    assert "magi pr" in text
     assert "council in use" in text  # which config is live
     assert "[repo] [task ...]" in text  # the real usage line, not `magi [-h]`
     # argparse colours its own sections; the epilog and the council table
@@ -282,6 +283,55 @@ def test_help_verb_matches_dash_help_and_lists_every_command(tmp_path, monkeypat
     with pytest.raises(SystemExit):
         main()
     assert capsys.readouterr().out == text
+
+
+def test_pr_verb_reviews_a_pr_headless(tmp_path, monkeypatch):
+    """`magi pr 42 --report` builds the packet from gh and runs headless on it."""
+    import sys
+
+    import magi.config as config
+    import magi.council as council
+    from magi.tui import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "load_council", lambda repo: {"melchior": object()})
+    monkeypatch.setattr(
+        council, "build_pr_packet",
+        lambda repo, number=None, task=None: f"PACKET {number} {task}",
+    )
+    seen = {}
+
+    def fake_run_headless(c, repo, task=None, as_json=False, packet=None, **kw):
+        seen.update(packet=packet, as_json=as_json)
+        return 0
+
+    monkeypatch.setattr(council, "run_headless", fake_run_headless)
+    monkeypatch.setattr(sys, "argv", ["magi", "pr", "42", "--report"])
+    with pytest.raises(SystemExit) as e:
+        main()
+    assert e.value.code == 0
+    assert seen["packet"] == "PACKET 42 None"
+
+
+def test_pr_verb_reports_gh_errors(tmp_path, monkeypatch, capsys):
+    import sys
+
+    import magi.config as config
+    import magi.council as council
+    from magi.tui import main
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config, "load_council", lambda repo: {"melchior": object()})
+
+    def boom(repo, number=None, task=None):
+        raise ValueError("no pull requests found")
+
+    monkeypatch.setattr(council, "build_pr_packet", boom)
+    monkeypatch.setattr(sys, "argv", ["magi", "pr", "--report"])
+    with pytest.raises(SystemExit) as e:
+        main()
+    assert e.value.code == council.EXIT_ERROR
+    assert "no pull requests found" in capsys.readouterr().err
 
 
 async def test_activity_shows_in_the_cell_and_the_status_line_divides():

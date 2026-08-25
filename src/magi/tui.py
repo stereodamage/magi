@@ -634,6 +634,44 @@ def _plan_main(argv: list[str]) -> None:
     ).run()
 
 
+def _pr_main(argv: list[str]) -> None:
+    import argparse
+    import sys
+
+    from .config import load_council
+    from .council import EXIT_ERROR, build_pr_packet, run_headless
+
+    ap = argparse.ArgumentParser(
+        prog="magi pr",
+        description="review a GitHub pull request via gh — the working tree stays untouched",
+    )
+    ap.add_argument("number", nargs="?", type=int,
+                    help="PR number (default: the current branch's PR)")
+    ap.add_argument("task", nargs="*", help="extra task / acceptance criteria")
+    ap.add_argument("--report", action="store_true", help="headless text report")
+    ap.add_argument("--json", action="store_true", help="headless JSON result")
+    args = ap.parse_args(argv)
+    repo = Path.cwd()
+    task = " ".join(args.task) or None
+    try:
+        council = load_council(repo)
+    except ValueError as e:
+        print(f"magi: config error: {e}", file=sys.stderr)
+        raise SystemExit(EXIT_ERROR)
+    try:
+        packet = build_pr_packet(repo, args.number, task)
+    except ValueError as e:
+        print(f"magi pr: {e}", file=sys.stderr)
+        raise SystemExit(EXIT_ERROR)
+    if args.json or args.report or not sys.stdout.isatty():
+        raise SystemExit(run_headless(
+            council, repo, task, as_json=args.json, packet=packet,
+        ))
+    MagiApp(
+        council=council, repo=repo, task=task, packet=packet, autostart=True,
+    ).run()
+
+
 def _epilog(cwd: Path) -> str:
     from .config import describe, help_theme
 
@@ -645,6 +683,8 @@ def _epilog(cwd: Path) -> str:
         f"  {lit}magi [repo] [task]{r}     review the working tree, or the last commit\n"
         f"                         when the tree is clean\n"
         f"  {lit}magi plan DOC [goals]{r}  review a plan or design before you build it\n"
+        f"  {lit}magi pr [NUMBER]{r}       review a GitHub PR via gh (default: the\n"
+        f"                         current branch's PR)\n"
         f"  {lit}magi init [--local]{r}    detect installed CLIs, write a council config\n"
         "\n"
         f"{h}exit codes (headless):{r}\n"
@@ -667,6 +707,8 @@ def main() -> None:
         return _init_main(sys.argv[2:])
     if sys.argv[1:2] == ["plan"]:
         return _plan_main(sys.argv[2:])
+    if sys.argv[1:2] == ["pr"]:
+        return _pr_main(sys.argv[2:])
 
     ap = argparse.ArgumentParser(
         prog="magi",

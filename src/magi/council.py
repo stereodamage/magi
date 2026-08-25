@@ -303,6 +303,48 @@ def build_plan_packet(doc: Path, context: str | None = None) -> str:
     )
 
 
+def _gh(repo: Path, *args: str) -> str:
+    """stdout of a gh command; a failure raises ValueError with gh's stderr."""
+    try:
+        r = subprocess.run(
+            ["gh", *args], cwd=str(repo), capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        raise ValueError("gh not found — install the GitHub CLI to review PRs") from None
+    if r.returncode != 0:
+        raise ValueError(r.stderr.strip() or f"gh {args[0]} exited {r.returncode}")
+    return r.stdout
+
+
+def build_pr_packet(repo: Path, number: int | None = None, task: str | None = None) -> str:
+    """Evidence packet for a GitHub PR, via gh. The working tree stays untouched,
+    so the checkout may not be at the PR's head — the packet says so."""
+    ref = [str(number)] if number is not None else []  # no ref: current branch's PR
+    view = json.loads(
+        _gh(repo, "pr", "view", *ref, "--json", "number,title,body,baseRefName")
+    )
+    number = view["number"]
+    diff = _gh(repo, "pr", "diff", str(number))
+    if not diff.strip():
+        raise ValueError(f"nothing to review: PR #{number} has an empty diff")
+    # gh pr diff takes no pathspec, so docs/ stays out of scope by instruction only
+    scope = (
+        f"PR #{number} (base: {view['baseRefName']}); "
+        "docs/ is out of scope — do not report on documents"
+    )
+    task_text = f"PR #{number} — {view['title']}\n\n{view['body'] or '(no description)'}"
+    if task:
+        task_text += f"\n\n{task}"
+    return (
+        "=== EVIDENCE PACKET ===\n\n"
+        f"TASK / ACCEPTANCE CRITERIA:\n{task_text}\n\n"
+        f"CHANGE UNDER REVIEW — {scope}:\n```diff\n{_truncate(diff)}```\n\n"
+        "The full repository is available read-only in your working "
+        "directory, but the checkout may not match the PR's head — trust "
+        "the diff over the tree when they disagree."
+    )
+
+
 async def review_member(
     role: str,
     backend,

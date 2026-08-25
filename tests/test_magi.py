@@ -508,6 +508,80 @@ def test_packet_works_in_repo_with_no_commits(tmp_path):
     assert "untracked files included" in packet
 
 
+# --- pr packet -----------------------------------------------------------------
+
+def _fake_gh(view, diff, calls=None):
+    import json as jsonlib
+
+    def gh(repo, *args):
+        if calls is not None:
+            calls.append(args)
+        if args[:2] == ("pr", "view"):
+            return jsonlib.dumps(view)
+        if args[:2] == ("pr", "diff"):
+            return diff
+        raise AssertionError(f"unexpected gh call: {args}")
+    return gh
+
+
+_PR_VIEW = {"number": 42, "title": "Add retry", "body": "Retries twice.",
+            "baseRefName": "main"}
+
+
+def test_pr_packet_has_diff_title_and_scope(monkeypatch, tmp_path):
+    from magi import council
+
+    calls = []
+    monkeypatch.setattr(council, "_gh",
+                        _fake_gh(_PR_VIEW, "diff --git a/a.py b/a.py\n+x = 2\n", calls))
+    packet = council.build_pr_packet(tmp_path, 42)
+    assert "PR #42" in packet and "base: main" in packet
+    assert "Add retry" in packet and "Retries twice." in packet
+    assert "+x = 2" in packet
+    assert "docs/ is out of scope" in packet
+    assert ("pr", "diff", "42") in calls
+    # the tree is not checked out at the PR's head — the members must know
+    assert "may not match" in packet
+
+
+def test_pr_packet_resolves_current_branch_pr(monkeypatch, tmp_path):
+    from magi import council
+
+    calls = []
+    monkeypatch.setattr(council, "_gh", _fake_gh(_PR_VIEW, "+x = 2\n", calls))
+    packet = council.build_pr_packet(tmp_path, None)
+    assert "PR #42" in packet  # number came from gh pr view
+    assert ("pr", "diff", "42") in calls
+    view = next(c for c in calls if c[:2] == ("pr", "view"))
+    assert "42" not in view  # no number passed: gh resolves the current branch
+
+
+def test_pr_packet_appends_explicit_task(monkeypatch, tmp_path):
+    from magi import council
+
+    monkeypatch.setattr(council, "_gh", _fake_gh(_PR_VIEW, "+x = 2\n"))
+    packet = council.build_pr_packet(tmp_path, 42, task="check the retry cap")
+    assert "check the retry cap" in packet
+
+
+def test_pr_packet_gh_failure_is_an_error(monkeypatch, tmp_path):
+    from magi import council
+
+    def gh(repo, *args):
+        raise ValueError("no pull requests found for branch \"main\"")
+    monkeypatch.setattr(council, "_gh", gh)
+    with pytest.raises(ValueError, match="no pull requests"):
+        council.build_pr_packet(tmp_path, None)
+
+
+def test_pr_packet_empty_diff_is_refused(monkeypatch, tmp_path):
+    from magi import council
+
+    monkeypatch.setattr(council, "_gh", _fake_gh(_PR_VIEW, "   \n"))
+    with pytest.raises(ValueError, match="nothing to review"):
+        council.build_pr_packet(tmp_path, 42)
+
+
 # --- defects found by review ---------------------------------------------------
 
 def test_two_members_may_pick_the_same_finding_id():
